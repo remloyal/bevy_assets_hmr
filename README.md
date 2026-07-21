@@ -373,6 +373,39 @@ fn on_image_changed(mut reader: MessageReader<AssetChanged<Image>>) {
 }
 ```
 
+### 在 `bsn!` 宏中使用 `AssetBind`
+
+Bevy 0.19 的 `bsn!` 宏支持把 `AssetBind<A>` 当作组件写在场景条目里。`AssetBind<A>` 内含 `Handle<A>`,而 Bevy 用 `SpecializeFromTemplate` auto-trait 把 `Handle<A>` 刻意排除在 `Unpin` 之外,导致它无法走 `FromTemplate` 的 blanket impl。为此本 crate 提供了手写的 `AssetBindTemplate<A>` 作为 `<AssetBind<A> as FromTemplate>::Template`,你无需关心其存在,直接写 `AssetBind<A>` 即可。
+
+```rust
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+    // 写法 A:{expr} 内联表达式
+    commands.spawn_scene(bsn! {
+        Node { width: percent(100), height: percent(100) }
+        Children [
+            (
+                ImageNode { image: {asset_server.load("textures/bg.jpg")} }
+                AssetBind<Image> { handle: {asset_server.load("textures/bg.jpg")} }
+            ),
+        ]
+    });
+
+    // 写法 B:外部变量(注意:裸 ident 在 bsn! 中会被当成函数名,必须用 { } 包裹)
+    let handle = asset_server.load::<Image>("textures/bg.jpg");
+    commands.spawn_scene(bsn! {
+        Node { width: percent(100), height: percent(100) }
+        Children [
+            (
+                ImageNode { image: {handle.clone()} }
+                AssetBind<Image> { handle: {handle.clone()} }
+            ),
+        ]
+    });
+}
+```
+
+> **注意**:`ImageNode` 的图片热更由 Bevy 原生 `RenderAssets::<GpuImage>` 负责(改了文件自动重传 GPU),**不需要** `AssetBind`。`AssetBind` 只在你需要"知道哪些实体绑定了这张图、收到 `AssetChanged<Image>` 后做额外自定义响应"时才加(如重建图集、重建碰撞体、记日志等)。
+
 ### 对比 `register_config` / `register_asset`
 
 | | `register_config` / `register_asset` | `watch_asset` |
@@ -399,6 +432,9 @@ cargo run --example multi_type -p bevy_assets_hmr
 
 # 直接模式：自定义 Asset + 自定义 Loader + register_asset
 cargo run --example direct_mode -p bevy_assets_hmr
+
+# bsn! 内联 AssetBind：验证 AssetBind<Image> 能直接在 bsn! 宏中作为组件使用
+cargo run --example bsn_asset_bind -p bevy_assets_hmr
 ```
 
 ### `basic.rs` - 包装模式最简流程
@@ -445,6 +481,24 @@ app.register_asset_loader(LevelAssetLoader);
 app.register_asset::<LevelAsset>("levels/level_1.level");
 // 订阅 MessageReader<ConfigRefresh<LevelAsset>>
 ```
+
+### `bsn_asset_bind.rs` - `bsn!` 内联 `AssetBind`
+
+验证 `AssetBind<Image>` 能否作为组件直接写在 `bsn!` 宏的场景条目中,以及 `{asset_server.load(...)}` 内联表达式作为字段值是否合法。同时演示外部 `Handle` 变量作为字段值的写法。
+
+```rust
+commands.spawn_scene(bsn! {
+    Node { width: percent(100), height: percent(100) }
+    Children [
+        (
+            ImageNode { image: {asset_server.load(BG_PATH)} }
+            AssetBind<Image> { handle: {asset_server.load(BG_PATH)} }
+        ),
+    ]
+});
+```
+
+> **前提**:App 构建时需调用 `app.watch_asset::<Image>()` 注册 `AssetBindCache<Image>` 与追踪系统。运行前需要 `assets/textures/bg.jpg`(已随仓库附带)。
 
 ## Bevy 0.19 兼容性
 

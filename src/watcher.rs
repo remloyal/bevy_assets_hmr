@@ -32,12 +32,13 @@
 //! }
 //! ```
 
-use bevy::asset::{Asset, AssetEvent, AssetId};
+use bevy::asset::{Asset, AssetEvent, AssetId, HandleTemplate};
 use bevy::ecs::{
     component::Component,
     entity::Entity,
     message::{Message, MessageReader, MessageWriter},
     system::{Query, Res, ResMut},
+    template::{FromTemplate, SpecializeFromTemplate, Template, TemplateContext},
 };
 use bevy::prelude::{Changed, Handle, RemovedComponents, Resource};
 use std::collections::{HashMap, HashSet};
@@ -55,6 +56,16 @@ pub struct AssetBind<A: Asset> {
     /// Handle to the asset this entity depends on.
     pub handle: Handle<A>,
 }
+
+// ["auto trait specialization" trick](https://github.com/coolcatcoder/rust_techniques/issues/1)
+// — mirrors Bevy's `impl Unpin for Handle<T> where for<'a> [()]: SpecializeFromTemplate`.
+// Because `SpecializeFromTemplate` has no impls, this fixes `AssetBind<A>` as
+// *definitely not* `Unpin`, which is what lets the hand-written `impl
+// FromTemplate for AssetBind<A>` below not conflict with Bevy's blanket
+// `impl<T: Clone + Default + Unpin> FromTemplate for T` (E0119). Without this,
+// the compiler assumes upstream *might* add `Unpin for Handle<T>` later and
+// rejects our impl as a potential future conflict.
+impl<A: Asset> Unpin for AssetBind<A> where for<'a> [()]: SpecializeFromTemplate {}
 
 impl<A: Asset> AssetBind<A> {
     /// Construct from a `Handle<A>` (typically from `AssetServer::load`).
@@ -83,6 +94,80 @@ impl<A: Asset> AssetBind<A> {
         };
         Self { handle }
     }
+}
+
+/// [`Template`] backed by a [`HandleTemplate<A>`], used as
+/// `<AssetBind<A> as FromTemplate>::Template` so that [`AssetBind<A>`] can be
+/// written directly inside `bevy::scene::bsn!`.
+///
+/// # Why this exists
+///
+/// Bevy 0.19's blanket `impl<T: Clone + Default + Unpin> FromTemplate for T`
+/// intentionally excludes `Handle<A>` (via the `SpecializeFromTemplate` auto-
+/// trait trick), forcing handle-bearing types to use a custom [`Template`].
+/// Because `AssetBind` contains a `Handle<A>`, it cannot pick up that
+/// blanket impl. This struct is the hand-written counterpart: it stores a
+/// [`HandleTemplate<A>`] (which already implements `Template<Output = Handle<A>>`),
+/// and builds an `AssetBind<A>` by resolving that template at spawn time.
+///
+/// `HandleTemplate<A>: Default + Clone + Send + Sync + 'static` for any
+/// `A: Asset`, this type also satisfies the `Template + Default + Send + Sync
+/// + 'static` bound required by `ResolvedScene::get_or_insert_template` (the
+/// insertion point used by `bsn!`'s `FromTemplatePatch` codegen).
+///
+/// # Usage in `bsn!`
+///
+/// You don't construct this directly. Just write `AssetBind<A>` like any other
+/// component in `bsn!`; both string-path and `Handle<A>` field values work,
+/// because `bsn!` inserts `.into()` and `HandleTemplate<A>: From<Handle<A>>`
+/// / `From<impl Into<AssetPath<'static>>>`:
+///
+/// ```ignore
+/// commands.spawn_scene(bsn! {
+///     ImageNode { image: "textures/bg.png" }
+///     AssetBind::<Image> { handle: "textures/bg.png" }
+/// });
+/// // or with a preloaded handle:
+/// let handle: Handle<Image> = asset_server.load("textures/bg.png");
+/// commands.spawn_scene(bsn! {
+///     ImageNode { image: handle.clone() }
+///     AssetBind::<Image> { handle }
+/// });
+/// ```
+#[derive(Default)]
+pub struct AssetBindTemplate<A: Asset> {
+    /// Handle template — accepts `Handle<A>`, `&'static str` (asset path), or
+    /// anything `Into<AssetPath<'static>>` at `bsn!` call sites.
+    pub handle: HandleTemplate<A>,
+}
+
+// Same `SpecializeFromTemplate` trick as `AssetBind<A>` above: makes
+// `AssetBindTemplate<A>` definitively `!Unpin` so its hand-written `Template`
+// impl doesn't conflict with Bevy's blanket `impl<T: Clone + Default + Unpin>
+// Template for T`.
+impl<A: Asset> Unpin for AssetBindTemplate<A> where for<'a> [()]: SpecializeFromTemplate {}
+
+impl<A: Asset> Template for AssetBindTemplate<A> {
+    type Output = AssetBind<A>;
+
+    fn build_template(
+        &self,
+        context: &mut TemplateContext,
+    ) -> bevy::ecs::error::Result<AssetBind<A>> {
+        Ok(AssetBind {
+            handle: self.handle.build_template(context)?,
+        })
+    }
+
+    fn clone_template(&self) -> Self {
+        Self {
+            handle: self.handle.clone_template(),
+        }
+    }
+}
+
+impl<A: Asset> FromTemplate for AssetBind<A> {
+    type Template = AssetBindTemplate<A>;
 }
 
 /// Cache mapping `AssetId<A> -> {Entity}` for all entities with

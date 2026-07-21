@@ -192,11 +192,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             let Some(new_asset) = assets.get(id) else {
                 // --- 回滚：新版本加载失败，用旧 snapshot 重建 Asset 并插回 ---
                 if let Some(old_config) = snapshots.map.get(&id).cloned() {
-                    let source_path = snapshots
-                        .source_paths
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_default();
+                    let source_path = snapshots.source_paths.get(&id).cloned().unwrap_or_default();
 
                     // 用旧 snapshot 重建 Asset 并插回 Assets
                     let rolled_back = A::from_config(old_config.clone(), source_path.clone());

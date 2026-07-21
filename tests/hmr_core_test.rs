@@ -794,7 +794,9 @@ fn rollback_on_asset_load_failure_dispatches_config_reload_failed() {
         let mut debouncer = app
             .world_mut()
             .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
-        debouncer.pending.insert(asset_id, std::time::Instant::now());
+        debouncer
+            .pending
+            .insert(asset_id, std::time::Instant::now());
     }
 
     // Step 4: Run frames → flush should detect missing asset, rollback,
@@ -848,7 +850,9 @@ fn no_rollback_when_no_snapshot_exists() {
         let mut debouncer = app
             .world_mut()
             .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
-        debouncer.pending.insert(asset_id, std::time::Instant::now());
+        debouncer
+            .pending
+            .insert(asset_id, std::time::Instant::now());
     }
 
     for _ in 0..3 {

@@ -48,8 +48,8 @@ pub use loader::ConfigLoader;
 pub use refresh::{ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind};
 pub use registry::ConfigPathRegistry;
 pub use watcher::{
-    AssetBind, AssetBindCache, AssetChanged, asset_bind_cleanup_system, asset_bind_registry_system,
-    asset_watcher_system,
+    AssetBind, AssetBindCache, AssetBindTemplate, AssetChanged, asset_bind_cleanup_system,
+    asset_bind_registry_system, asset_watcher_system,
 };
 
 // Re-export derive macro，让用户 `use bevy_assets_hmr::ConfigDiff` 同时
