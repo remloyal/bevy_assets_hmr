@@ -21,7 +21,7 @@
 use crate::binding::HandleEntityCache;
 use crate::core::{HmrSource, LastSnapshot};
 use crate::diff::ConfigDiff;
-use crate::refresh::{ConfigRefresh, ConfigRemoved, DiffKind};
+use crate::refresh::{ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind};
 use bevy::asset::{AssetId, Assets};
 use bevy::ecs::message::MessageWriter;
 use bevy::prelude::{Res, ResMut, Resource};
@@ -44,6 +44,16 @@ pub struct RefreshDebouncer<A: HmrSource> {
     /// Debounce window. Set by `App::register_config` from
     /// `ConfigHmrPlugin::debounce_window`.
     pub window: Duration,
+    /// 每个 id 上次被 flush 的时间（用于死循环保护 cooldown）。
+    ///
+    /// flush 成功后记录 `Instant::now()`；cooldown 时间内同一 id 的新事件
+    /// 会被 `enqueue` 直接跳过，防止「重载回调写文件 → file_watcher 触发
+    /// → 再次 enqueue → flush → 写文件 → …」无限循环。
+    pub flushed_at: HashMap<AssetId<A>, Instant>,
+    /// Cooldown 窗口：flush 后在此时间内不再处理同一 id 的新事件。
+    /// 默认 500ms，区分于 debounce 窗口（debounce 是合并短时间多次写入，
+    /// cooldown 是防止写回触发的递归重入）。
+    pub cooldown: Duration,
 }
 
 impl<A: HmrSource> Default for RefreshDebouncer<A> {
@@ -52,12 +62,23 @@ impl<A: HmrSource> Default for RefreshDebouncer<A> {
             pending: HashMap::new(),
             pending_removed: HashMap::new(),
             window: Duration::from_millis(150),
+            flushed_at: HashMap::new(),
+            cooldown: Duration::from_millis(500),
         }
     }
 }
 
 /// Enqueue a modified asset for debounced refresh. Called by `hmr_core_system`.
+///
+/// 如果该 id 刚被 flush 且在 cooldown 窗口内，直接跳过——防止「重载回调写文件
+/// → file_watcher 触发 → 再次 enqueue」的无限循环。
 pub(crate) fn enqueue<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>, id: AssetId<A>) {
+    // Cooldown 检查：防止写回死循环
+    if let Some(last_flush) = debouncer.flushed_at.get(&id) {
+        if last_flush.elapsed() < debouncer.cooldown {
+            return;
+        }
+    }
     debouncer.pending.insert(id, Instant::now());
 }
 
@@ -86,11 +107,12 @@ pub(crate) fn enqueue_removed<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>,
 /// existed) and cleans up the snapshot.
 pub fn flush_debounced_refresh<A: HmrSource>(
     mut debouncer: ResMut<RefreshDebouncer<A>>,
-    assets: Res<Assets<A>>,
+    mut assets: ResMut<Assets<A>>,
     cache: Res<HandleEntityCache<A>>,
     mut snapshots: ResMut<LastSnapshot<A>>,
     mut refresh_evts: MessageWriter<ConfigRefresh<A::Config>>,
     mut removed_evts: MessageWriter<ConfigRemoved<A::Config>>,
+    mut failed_evts: MessageWriter<ConfigReloadFailed<A::Config>>,
 ) {
     let any_pending = !debouncer.pending.is_empty();
     let any_removed = !debouncer.pending_removed.is_empty();
@@ -157,11 +179,39 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             debouncer.pending.remove(&id);
 
             let Some(new_asset) = assets.get(id) else {
-                // Asset was unloaded; drop the snapshot too. (If a
-                // `Removed` event arrives next frame, `pending_removed`
-                // handles the `ConfigRemoved` dispatch.)
-                snapshots.map.remove(&id);
-                snapshots.source_paths.remove(&id);
+                // --- 回滚：新版本加载失败，用旧 snapshot 重建 Asset 并插回 ---
+                if let Some(old_config) = snapshots.map.get(&id).cloned() {
+                    let source_path = snapshots
+                        .source_paths
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    // 用旧 snapshot 重建 Asset 并插回 Assets
+                    let rolled_back = A::from_config(old_config.clone(), source_path.clone());
+                    let _ = assets.insert(id, rolled_back);
+
+                    // 收集关联实体
+                    let target_entities: Vec<_> = cache
+                        .get_entities(&id)
+                        .map(|s| s.iter().copied().collect())
+                        .unwrap_or_default();
+
+                    // 派发失败事件
+                    failed_evts.write(ConfigReloadFailed {
+                        source_path,
+                        error: String::from("资产已损坏或无法加载，已自动回滚至上一版本"),
+                        target_entities,
+                        current_config: old_config,
+                    });
+
+                    // 记录 flush 时间（cooldown 保护）
+                    debouncer.flushed_at.insert(id, Instant::now());
+                } else {
+                    // 无旧版本可回滚：清理 snapshot
+                    snapshots.map.remove(&id);
+                    snapshots.source_paths.remove(&id);
+                }
                 continue;
             };
 
@@ -205,13 +255,27 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 .map(|s| s.iter().copied().collect())
                 .unwrap_or_default();
 
+            let changed_count = changed_ids.len();
+            let entity_count = target_entities.len();
+
             refresh_evts.write(ConfigRefresh {
                 new_config: new_raw.clone(),
-                target_entities,
+                target_entities: target_entities.clone(),
                 changed_ids,
                 diff_kind,
                 source_path: new_asset.source_path().to_string(),
             });
+
+            // 记录 flush 时间（cooldown 保护，防止写回死循环）
+            debouncer.flushed_at.insert(id, Instant::now());
+
+            // info 日志：路径 + changed_ids 数 + 关联实体数
+            bevy::log::info!(
+                "[HMR] {} 已更新，changed_ids={}，关联实体数={}",
+                new_asset.source_path(),
+                changed_count,
+                entity_count,
+            );
         }
     }
 }

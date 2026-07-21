@@ -157,6 +157,7 @@ impl SimpleConfigDiff for LevelAsset {
 impl HmrSource for LevelAsset {
     type Config = LevelAsset;
     fn config(&self) -> &Self::Config { self }
+    fn from_config(config: Self::Config, _source_path: String) -> Self { config }
 }
 
 // 3. 用户自己的 Loader（和 bevy 官方 custom_asset.rs 一样）
@@ -430,6 +431,7 @@ app.register_config::<NpcDatabase>("data/npc.ron")
 impl HmrSource for LevelAsset {
     type Config = LevelAsset;
     fn config(&self) -> &Self { self }
+    fn from_config(config: Self::Config, _source_path: String) -> Self { config }
 }
 
 app.init_asset::<LevelAsset>();
@@ -458,6 +460,32 @@ hmr = ["bevy/file_watcher"]
 ### `Assets::insert` 的事件派发时机
 
 `Assets::insert` 把事件写入 `queued_events`，由 `Assets::asset_events` 系统（在 `PostUpdate`）flush 到 `Messages<AssetEvent>`。同一帧内 `insert` 后立刻读 `MessageReader` 读不到（要等下一帧）。测试用 `insert_config` 直接初始化快照绕过这个延迟。
+
+## 常见问题（FAQ）
+
+### Q: ron/json 语法写错了会怎样？会丢失数据吗？
+
+不会。如果 `ConfigLoader` 解析失败导致资产无法加载，框架会自动回滚到上一有效版本，用快照重建资产并插回 `Assets`。同时派发 `ConfigReloadFailed<T>` 事件通知订阅方。控制台也会输出错误信息。
+
+### Q: 修改 GLTF 贴图后，材质为什么不联动刷新？
+
+Bevy 的 `AssetServer` 只重载被修改的文件本身，不解析资产内部依赖树。`watch_asset` 只通知文件变更，不会自动刷新引用该贴图的材质。如需联动，请在 `AssetChanged<Image>` 订阅方手动处理材质重建。
+
+### Q: 频繁保存文件（多次 Ctrl+S）会触发多次重载吗？
+
+不会。内置防抖窗口（默认 150ms，可通过 `ConfigHmrPlugin { debounce_window: ... }` 配置）会合并短时间内的多次写入。此外还有 500ms cooldown 机制防止重载回调写文件导致的死循环。
+
+### Q: Release 构建时 HMR 还有运行时开销吗？
+
+零开销。`dev` feature（默认启用）控制所有 HMR 运行时系统。发布时用 `--no-default-features` 编译，所有监听、diff、派发逻辑被编译期完全剔除：
+```toml
+[dependencies]
+bevy_assets_hmr = { git = "https://github.com/remloyal/bevy_assets_hmr", default-features = false }
+```
+
+### Q: Web（WASM）平台能用吗？
+
+目前不支持。`bevy/file_watcher` 在 WASM 环境中无法工作，本框架暂无替代轮询方案。这是已知限制。
 
 ## License
 

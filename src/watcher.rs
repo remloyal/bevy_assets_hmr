@@ -223,6 +223,8 @@ pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
 
+        let target_count = target_entities.len();
+
         // Even with zero target_entities, dispatch so subscribers using the
         // event (not the binding) can react. But skip if there are no
         // subscribers at all — the MessageWriter will just be dropped if
@@ -233,5 +235,12 @@ pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
             source_path: String::new(), // AssetServer doesn't expose path lookup easily
             new_asset: asset.clone(),
         });
+
+        bevy::log::info!(
+            "[HMR] AssetChanged<{}> asset_id={:?}，关联实体数={}",
+            std::any::type_name::<A>(),
+            id,
+            target_count,
+        );
     }
 }

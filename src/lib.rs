@@ -45,7 +45,7 @@ pub use debounce::{RefreshDebouncer, flush_debounced_refresh};
 pub use diff::{ConfigDiff, SimpleConfigDiff};
 pub use ext::ConfigHmrAppExt;
 pub use loader::ConfigLoader;
-pub use refresh::{ConfigRefresh, ConfigRemoved, DiffKind};
+pub use refresh::{ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind};
 pub use registry::ConfigPathRegistry;
 pub use watcher::{
     AssetBind, AssetBindCache, AssetChanged, asset_bind_cleanup_system, asset_bind_registry_system,

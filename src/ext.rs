@@ -23,7 +23,7 @@ use crate::binding::HandleEntityCache;
 use crate::core::{HmrAsset, HmrSource, LastSnapshot};
 use crate::debounce::RefreshDebouncer;
 use crate::loader::ConfigLoader;
-use crate::refresh::{ConfigRefresh, ConfigRemoved};
+use crate::refresh::{ConfigRefresh, ConfigReloadFailed, ConfigRemoved};
 use crate::registry::ConfigPathRegistry;
 use bevy::app::App;
 use bevy::asset::{AssetId, Assets};
@@ -111,6 +111,7 @@ pub trait ConfigHmrAppExt {
     /// # impl HmrSource for MyAsset {
     /// #     type Config = MyAsset;
     /// #     fn config(&self) -> &Self::Config { self }
+    /// #     fn from_config(config: Self::Config, _source_path: String) -> Self { config }
     /// # }
     /// # let mut app = App::new();
     /// # app.add_plugins(bevy::asset::AssetPlugin::default());
@@ -207,7 +208,8 @@ impl ConfigHmrAppExt for App {
             .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
             .init_resource::<LastSnapshot<ConfigAsset<T>>>()
             .add_message::<ConfigRefresh<T>>()
-            .add_message::<ConfigRemoved<T>>();
+            .add_message::<ConfigRemoved<T>>()
+            .add_message::<ConfigReloadFailed<T>>();
 
         #[cfg(feature = "dev")]
         {
@@ -294,7 +296,8 @@ impl ConfigHmrAppExt for App {
             .init_resource::<RefreshDebouncer<A>>()
             .init_resource::<LastSnapshot<A>>()
             .add_message::<ConfigRefresh<A::Config>>()
-            .add_message::<ConfigRemoved<A::Config>>();
+            .add_message::<ConfigRemoved<A::Config>>()
+            .add_message::<ConfigReloadFailed<A::Config>>();
 
         #[cfg(feature = "dev")]
         {

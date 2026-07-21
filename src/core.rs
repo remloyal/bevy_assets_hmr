@@ -57,6 +57,11 @@ pub trait HmrSource: Asset + Send + Sync + 'static {
     fn source_path(&self) -> &str {
         ""
     }
+    /// 从 Config 值和 source_path 重建 Asset（用于回滚）。
+    ///
+    /// 包装模式（`ConfigAsset<T>`）自动实现为 `ConfigAsset { raw: config, source_path }`。
+    /// 直接模式用户需手动实现：通常直接返回 config（因为 Asset 本身就是 Config）。
+    fn from_config(config: Self::Config, source_path: String) -> Self;
 }
 
 /// Per-type snapshot of the last-seen `Config` value for each `AssetId<A>`.
@@ -169,5 +174,11 @@ impl<T: HmrAsset> HmrSource for ConfigAsset<T> {
     }
     fn source_path(&self) -> &str {
         &self.source_path
+    }
+    fn from_config(config: T, source_path: String) -> Self {
+        ConfigAsset {
+            raw: config,
+            source_path,
+        }
     }
 }

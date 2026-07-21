@@ -78,6 +78,25 @@ impl<T: ConfigDiff + Clone + Send + Sync + 'static> Default for ConfigRemoved<T>
     }
 }
 
+/// 事件：配置资产重载失败，已自动回滚至上一有效版本。
+///
+/// 当 `ConfigLoader` 解析失败（ron/json 语法错误等）、新版本无法加载时，
+/// 框架会自动回滚至上一可用版本并从快照重建 Asset。本事件通知订阅方
+/// 重载失败的事实，方便做 UI 提示或日志记录。
+///
+/// `T` 是 Config 数据类型（与 [`ConfigRefresh<T>`] 相同）。
+#[derive(Message, Clone)]
+pub struct ConfigReloadFailed<T: ConfigDiff + Clone + Send + Sync + 'static> {
+    /// 源文件路径（相对 `assets/`，如 `data/npc.ron`）。
+    pub source_path: String,
+    /// 错误描述（来自 AssetLoader 的错误信息或框架内部判断）。
+    pub error: String,
+    /// 回滚后仍绑定到此资产的实体（从 HandleEntityCache 快照取得）。
+    pub target_entities: Vec<bevy::ecs::entity::Entity>,
+    /// 当前生效的配置值（上一版本的旧值，即回滚到的版本）。
+    pub current_config: T,
+}
+
 /// Coarse categorization of the diff result.
 ///
 /// Subscribers can use this to pick a refresh strategy:
