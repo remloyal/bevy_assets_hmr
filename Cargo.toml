@@ -1,0 +1,28 @@
+[package]
+name = "bevy_assets_hmr"
+version = "0.1.0"
+edition = "2024"
+description = "Generic HMR framework for Bevy 0.19 — hot-reload ron/json configs with targeted refresh"
+license = "MIT"
+
+[dependencies]
+bevy = { version = "0.19.0", default-features = false, features = [
+    "bevy_asset",
+    "bevy_log",
+] }
+bevy_assets_hmr_derive = { path = "./bevy_assets_hmr_derive" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ron = "0.12.2"
+thiserror = "2.0"
+
+[dev-dependencies]
+bevy = { version = "0.19.0", default-features = false, features = [
+    "bevy_asset",
+    "bevy_log",
+] }
+uuid = "1"
+
+# HMR 文件监听由消费方启用 `bevy/file_watcher` feature 实现（bevy 0.19
+# 依赖 notify-debouncer-full ^0.7.0，现已可用）。本 crate 只负责
+# diff + 派发 ConfigRefresh，不直接监听文件。
