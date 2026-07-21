@@ -207,8 +207,11 @@ impl ConfigHmrAppExt for App {
             .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
             .init_resource::<LastSnapshot<ConfigAsset<T>>>()
             .add_message::<ConfigRefresh<T>>()
-            .add_message::<ConfigRemoved<T>>()
-            .add_systems(
+            .add_message::<ConfigRemoved<T>>();
+
+        #[cfg(feature = "dev")]
+        {
+            self.add_systems(
                 Update,
                 (
                     crate::binding::config_binding_registry_system::<ConfigAsset<T>>,
@@ -224,6 +227,7 @@ impl ConfigHmrAppExt for App {
                     bevy::time::common_conditions::on_timer(Duration::from_secs(30)),
                 ),
             );
+        }
 
         // Apply the global debounce window to this type's debouncer.
         self.world_mut()
@@ -290,8 +294,11 @@ impl ConfigHmrAppExt for App {
             .init_resource::<RefreshDebouncer<A>>()
             .init_resource::<LastSnapshot<A>>()
             .add_message::<ConfigRefresh<A::Config>>()
-            .add_message::<ConfigRemoved<A::Config>>()
-            .add_systems(
+            .add_message::<ConfigRemoved<A::Config>>();
+
+        #[cfg(feature = "dev")]
+        {
+            self.add_systems(
                 Update,
                 (
                     crate::binding::config_binding_registry_system::<A>,
@@ -307,6 +314,7 @@ impl ConfigHmrAppExt for App {
                     bevy::time::common_conditions::on_timer(Duration::from_secs(30)),
                 ),
             );
+        }
 
         self.world_mut()
             .resource_mut::<RefreshDebouncer<A>>()
@@ -342,15 +350,18 @@ impl ConfigHmrAppExt for App {
         self.add_message::<crate::watcher::AssetChanged<A>>();
 
         // Systems: registry -> cleanup -> watcher, chained every frame.
-        self.add_systems(
-            Update,
-            (
-                asset_bind_registry_system::<A>,
-                asset_bind_cleanup_system::<A>,
-                asset_watcher_system::<A>,
-            )
-                .chain(),
-        );
+        #[cfg(feature = "dev")]
+        {
+            self.add_systems(
+                Update,
+                (
+                    asset_bind_registry_system::<A>,
+                    asset_bind_cleanup_system::<A>,
+                    asset_watcher_system::<A>,
+                )
+                    .chain(),
+            );
+        }
 
         // Startup: load the asset and hold a strong handle so it isn't
         // unloaded. We reuse ConfigHandle<A> (a generic handle-holder) for
