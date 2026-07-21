@@ -76,6 +76,11 @@ pub(crate) fn enqueue<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>, id: Ass
     // Cooldown 检查：防止写回死循环
     if let Some(last_flush) = debouncer.flushed_at.get(&id) {
         if last_flush.elapsed() < debouncer.cooldown {
+            bevy::log::debug!(
+                "[HMR] {} skipped: within cooldown window ({}ms since last flush)",
+                A::type_path(),
+                last_flush.elapsed().as_millis(),
+            );
             return;
         }
     }
@@ -89,6 +94,12 @@ pub(crate) fn enqueue_removed<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>,
 }
 
 /// System: flush any pending refreshes whose debounce window has elapsed.
+///
+/// 注意：`assets` 参数从 `Res<Assets<A>>` 改为 `ResMut<Assets<A>>`，
+/// 因为回滚逻辑需要在 `assets.get(id)` 失败时执行 `assets.insert(id, ...)`
+/// 将旧快照重建的资产插回。这会与所有读 `Assets<A>` 的系统串行化——
+/// 对于注册了大量 asset 类型的应用可能有微小的帧时间影响，但回滚是
+/// 低频事件（仅在文件损坏/语法错误时触发），实际影响可忽略。
 ///
 /// For each ready id:
 /// 1. Look up the new `A` from `Assets`.
@@ -197,10 +208,13 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                         .map(|s| s.iter().copied().collect())
                         .unwrap_or_default();
 
-                    // 派发失败事件
+                    // 派发失败事件（包含 source_path 以便定位问题文件）
                     failed_evts.write(ConfigReloadFailed {
-                        source_path,
-                        error: String::from("资产已损坏或无法加载，已自动回滚至上一版本"),
+                        source_path: source_path.clone(),
+                        error: format!(
+                            "Asset corrupted or failed to load for '{}'; rolled back to previous version",
+                            source_path
+                        ),
                         target_entities,
                         current_config: old_config,
                     });
@@ -260,7 +274,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
 
             refresh_evts.write(ConfigRefresh {
                 new_config: new_raw.clone(),
-                target_entities: target_entities.clone(),
+                target_entities,
                 changed_ids,
                 diff_kind,
                 source_path: new_asset.source_path().to_string(),

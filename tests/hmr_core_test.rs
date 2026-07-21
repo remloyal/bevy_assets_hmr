@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy_assets_hmr::{
     ConfigAsset, ConfigBind, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh,
-    ConfigRemoved, HandleEntityCache, LastSnapshot, RefreshDebouncer,
+    ConfigReloadFailed, ConfigRemoved, HandleEntityCache, LastSnapshot, RefreshDebouncer,
 };
 // 注：`ConfigRefresh<TestDb>` 的泛型是 Config 类型（`ConfigAsset<TestDb>::Config = TestDb`），
 // 所以仍是 `ConfigRefresh<TestDb>`。`RefreshDebouncer` / `LastSnapshot` 的泛型是
@@ -590,7 +590,7 @@ fn watch_asset_dispatches_asset_changed_on_modified() {
     // Modify the asset (triggers Modified -> AssetChanged dispatched).
     {
         let mut assets = app.world_mut().resource_mut::<Assets<DummyTexture>>();
-        assets.insert(
+        let _ = assets.insert(
             asset_id,
             DummyTexture {
                 width: 128,
@@ -717,4 +717,153 @@ fn watch_asset_despawned_entity_removed_from_cache() {
             "despawned entity must be removed from AssetBindCache"
         );
     }
+}
+
+// ===========================================================================
+// Rollback + ConfigReloadFailed tests
+// ===========================================================================
+
+#[derive(Resource, Default)]
+struct CapturedReloadFailed(Option<ConfigReloadFailed<TestDb>>);
+
+fn capture_reload_failed_system(
+    mut reader: MessageReader<ConfigReloadFailed<TestDb>>,
+    mut captured: ResMut<CapturedReloadFailed>,
+) {
+    for evt in reader.read() {
+        captured.0 = Some(evt.clone());
+    }
+}
+
+#[test]
+fn rollback_on_asset_load_failure_dispatches_config_reload_failed() {
+    // Scenario: an asset has a prior snapshot but the asset is removed from
+    // Assets (simulating a loader failure on reload). flush_debounced_refresh
+    // should:
+    // 1. Reconstruct the asset from snapshot via HmrSource::from_config
+    // 2. Re-insert it into Assets (rollback)
+    // 3. Dispatch ConfigReloadFailed
+
+    let mut app = make_app(Duration::from_millis(0));
+    app.add_systems(Update, capture_reload_failed_system);
+    app.insert_resource(CapturedReloadFailed::default());
+
+    let asset_id = make_id(200);
+
+    // Step 1: Insert initial asset (first load → snapshot auto-created)
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "x".into(),
+                        n: 42,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+
+    // Run frames: snapshot should be auto-initialized.
+    for _ in 0..3 {
+        app.update();
+    }
+
+    {
+        let snapshots = app.world().resource::<LastSnapshot<ConfigAsset<TestDb>>>();
+        assert!(
+            snapshots.map.contains_key(&asset_id),
+            "snapshot should exist after first load"
+        );
+    }
+
+    // Step 2: Remove the asset from Assets (simulate loader failure).
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        assets.remove(asset_id);
+    }
+
+    // Step 3: Manually enqueue the id in the debouncer so flush runs.
+    {
+        let mut debouncer = app
+            .world_mut()
+            .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
+        debouncer.pending.insert(asset_id, std::time::Instant::now());
+    }
+
+    // Step 4: Run frames → flush should detect missing asset, rollback,
+    //         and dispatch ConfigReloadFailed.
+    for _ in 0..5 {
+        app.update();
+    }
+
+    // Verify ConfigReloadFailed was dispatched.
+    let captured = app.world().resource::<CapturedReloadFailed>();
+    let evt = captured
+        .0
+        .as_ref()
+        .expect("ConfigReloadFailed should be dispatched on rollback");
+    assert_eq!(evt.source_path, "data/test.ron");
+    assert_eq!(
+        evt.current_config.items[0].id, "x",
+        "current_config should be the old snapshot value"
+    );
+    assert_eq!(evt.current_config.items[0].n, 42);
+    assert!(
+        evt.error.contains("rolled back"),
+        "error message should mention rollback"
+    );
+
+    // Verify asset was re-inserted into Assets (rollback).
+    let assets = app.world().resource::<Assets<ConfigAsset<TestDb>>>();
+    let rolled_back = assets
+        .get(asset_id)
+        .expect("asset should be re-inserted by rollback");
+    assert_eq!(
+        rolled_back.raw.items[0].n, 42,
+        "re-inserted asset should match snapshot value"
+    );
+    assert_eq!(rolled_back.source_path, "data/test.ron");
+}
+
+#[test]
+fn no_rollback_when_no_snapshot_exists() {
+    // If an asset id has no prior snapshot, assets.get(id) → None should
+    // just clean up (no crash, no ConfigReloadFailed, nothing re-inserted).
+
+    let mut app = make_app(Duration::from_millis(0));
+    app.add_systems(Update, capture_reload_failed_system);
+    app.insert_resource(CapturedReloadFailed::default());
+
+    let asset_id = make_id(201);
+
+    // Manually enqueue an id that has no snapshot (and no asset).
+    {
+        let mut debouncer = app
+            .world_mut()
+            .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
+        debouncer.pending.insert(asset_id, std::time::Instant::now());
+    }
+
+    for _ in 0..3 {
+        app.update();
+    }
+
+    // No ConfigReloadFailed should be dispatched.
+    let captured = app.world().resource::<CapturedReloadFailed>();
+    assert!(
+        captured.0.is_none(),
+        "no ConfigReloadFailed when no snapshot exists"
+    );
+
+    // Asset should NOT be in Assets (nothing was re-inserted).
+    let assets = app.world().resource::<Assets<ConfigAsset<TestDb>>>();
+    assert!(assets.get(asset_id).is_none());
 }
