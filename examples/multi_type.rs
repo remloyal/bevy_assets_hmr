@@ -9,18 +9,14 @@ use bevy::asset::{Asset, AssetId, Assets};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy_assets_hmr::{
-    ConfigAsset, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh,
-};
+use bevy_assets_hmr::{ConfigAsset, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
 // ============ NpcDatabase ============
 
-#[derive(
-    Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff,
-)]
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff)]
 #[config_diff(field = "npcs", id = "id")]
 struct NpcDatabase {
     npcs: Vec<NpcEntry>,
@@ -34,9 +30,7 @@ struct NpcEntry {
 
 // ============ ItemDatabase ============
 
-#[derive(
-    Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff,
-)]
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff)]
 #[config_diff(field = "items", id = "id")]
 struct ItemDatabase {
     items: Vec<ItemEntry>,
@@ -102,7 +96,10 @@ fn simulate(
     }
 
     if *tick == 4 {
-        println!("\n[第 {} 帧] 只修改 ItemDatabase（修改 item_1 价格）", *tick);
+        println!(
+            "\n[第 {} 帧] 只修改 ItemDatabase（修改 item_1 价格）",
+            *tick
+        );
         let old = item_snapshots
             .map
             .get(&ids.item)
@@ -138,6 +135,10 @@ fn simulate(
 }
 
 fn main() {
+    // AssetServer::load（由 register_config 的 Startup 系统触发）需要 IoTaskPool。
+    use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
+
     let mut app = App::new();
     app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
 

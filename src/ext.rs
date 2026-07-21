@@ -17,14 +17,14 @@
 //! `ConfigRefresh<A::Config>` 消息，并用 `load_config_at_startup::<A>`
 //! Startup 系统加载文件。
 
+use crate::HmrSettings;
 use crate::asset::{ConfigAsset, ConfigHandle};
 use crate::binding::HandleEntityCache;
 use crate::core::{HmrAsset, HmrSource, LastSnapshot};
 use crate::debounce::RefreshDebouncer;
 use crate::loader::ConfigLoader;
-use crate::refresh::ConfigRefresh;
+use crate::refresh::{ConfigRefresh, ConfigRemoved};
 use crate::registry::ConfigPathRegistry;
-use crate::HmrSettings;
 use bevy::app::App;
 use bevy::asset::{AssetId, Assets};
 use bevy::ecs::message::{MessageRegistry, ShouldUpdateMessages};
@@ -65,12 +65,11 @@ pub trait ConfigHmrAppExt {
     /// # use bevy::reflect::TypePath;
     /// # use serde::{Deserialize, Serialize};
     /// # use std::collections::HashSet;
-    /// # use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, ConfigDiff};
-    /// # #[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+    /// # use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, SimpleConfigDiff};
+    /// # #[derive(bevy::asset::Asset, bevy::reflect::TypePath, Clone, PartialEq, Default)]
+    /// # #[derive(serde::Deserialize, serde::Serialize)]
     /// # struct MyDb;
-    /// # impl ConfigDiff for MyDb {
-    /// #     fn diff(_old: &Self, _new: &Self) -> (HashSet<String>, HashSet<String>, HashSet<String>) { Default::default() }
-    /// # }
+    /// # impl SimpleConfigDiff for MyDb {}
     /// # let mut app = App::new();
     /// app.add_plugins(ConfigHmrPlugin::default());
     /// app.register_config::<MyDb>("data/my.ron");
@@ -105,13 +104,10 @@ pub trait ConfigHmrAppExt {
     /// # use bevy::asset::{Asset, AssetLoader, io::Reader, LoadContext};
     /// # use bevy::reflect::TypePath;
     /// # use serde::{Deserialize, Serialize};
-    /// # use std::collections::HashSet;
-    /// # use bevy_assets_hmr::{ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, HmrSource};
+    /// # use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, HmrSource, SimpleConfigDiff};
     /// # #[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
     /// # struct MyAsset { value: i32 }
-    /// # impl ConfigDiff for MyAsset {
-    /// #     fn diff(_old: &Self, _new: &Self) -> (HashSet<String>, HashSet<String>, HashSet<String>) { Default::default() }
-    /// # }
+    /// # impl SimpleConfigDiff for MyAsset {}
     /// # impl HmrSource for MyAsset {
     /// #     type Config = MyAsset;
     /// #     fn config(&self) -> &Self::Config { self }
@@ -150,6 +146,44 @@ pub trait ConfigHmrAppExt {
     ///
     /// In a real app with `DefaultPlugins`, this is a no-op equivalent.
     fn setup_hmr_headless(&mut self) -> &mut Self;
+
+    /// Watch an **arbitrary** `Asset` type for file-level hot-reload — no
+    /// `ConfigDiff` / `HmrSource` required.
+    ///
+    /// This is the "lighter" alternative to [`register_asset`](Self::register_asset)
+    /// for asset types where you only need change-notification + entity
+    /// binding tracking, not id-level diffing. Typical use cases: `Image`,
+    /// `Scene` (gltf), `AudioSource`, `Mesh`, fonts.
+    ///
+    /// Bevy's `AssetServer` (with `bevy/file_watcher`) handles the actual
+    /// file reloading and GPU upload for built-in types. This method adds:
+    ///
+    /// 1. **Entity binding** via `AssetBind<A>` — attach to entities so the
+    ///    framework knows which entities depend on a given handle.
+    /// 2. **Change notification** via `AssetChanged<A>` — dispatched on
+    ///    `AssetEvent::Added` / `Modified`.
+    ///
+    /// Unlike `register_asset`, this does **not**:
+    /// - require `ConfigDiff` or `HmrSource`
+    /// - register a `ConfigLoader` (use your own loader / Bevy's built-ins)
+    /// - create a `LastSnapshot` or `RefreshDebouncer` (no diff/debounce)
+    /// - dispatch `ConfigRefresh` / `ConfigRemoved`
+    ///
+    /// You **must** call `app.init_asset::<A>()` yourself (or use
+    /// `DefaultPlugins` which handles it for built-in types).
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Requires `bevy/file_watcher` feature + a real asset type like Image.
+    /// use bevy::prelude::*;
+    /// use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin};
+    /// let mut app = App::new();
+    /// app.add_plugins(DefaultPlugins); // enables bevy/file_watcher
+    /// app.add_plugins(ConfigHmrPlugin::default());
+    /// app.watch_asset::<Image>("textures/player.png");
+    /// // Subscribe via MessageReader<AssetChanged<Image>> in your system.
+    /// ```
+    fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self, path: &str) -> &mut Self;
 }
 
 impl ConfigHmrAppExt for App {
@@ -173,10 +207,12 @@ impl ConfigHmrAppExt for App {
             .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
             .init_resource::<LastSnapshot<ConfigAsset<T>>>()
             .add_message::<ConfigRefresh<T>>()
+            .add_message::<ConfigRemoved<T>>()
             .add_systems(
                 Update,
                 (
                     crate::binding::config_binding_registry_system::<ConfigAsset<T>>,
+                    crate::binding::config_binding_cleanup_system::<ConfigAsset<T>>,
                     crate::core::hmr_core_system::<ConfigAsset<T>>,
                     crate::debounce::flush_debounced_refresh::<ConfigAsset<T>>,
                 )
@@ -185,7 +221,7 @@ impl ConfigHmrAppExt for App {
             .add_systems(
                 Update,
                 crate::core::cache_validation_system::<ConfigAsset<T>>.run_if(
-                    bevy::time::common_conditions::on_timer(Duration::from_secs(5)),
+                    bevy::time::common_conditions::on_timer(Duration::from_secs(30)),
                 ),
             );
 
@@ -204,7 +240,10 @@ impl ConfigHmrAppExt for App {
         // 记录 path 在 ConfigPathRegistry 里，Startup 系统会读取它来 load。
         // 用一个泛型 Startup 系统避免闭包 + 泛型 + move 的类型推断问题。
         // 包装模式下 `A = ConfigAsset<T>`。
-        self.add_systems(Startup, crate::ext::load_config_at_startup::<ConfigAsset<T>>);
+        self.add_systems(
+            Startup,
+            crate::ext::load_config_at_startup::<ConfigAsset<T>>,
+        );
 
         self
     }
@@ -216,9 +255,7 @@ impl ConfigHmrAppExt for App {
         source_path: &str,
     ) -> &mut Self {
         {
-            let mut assets = self
-                .world_mut()
-                .resource_mut::<Assets<ConfigAsset<T>>>();
+            let mut assets = self.world_mut().resource_mut::<Assets<ConfigAsset<T>>>();
             let _ = assets.insert(
                 id,
                 ConfigAsset {
@@ -253,10 +290,12 @@ impl ConfigHmrAppExt for App {
             .init_resource::<RefreshDebouncer<A>>()
             .init_resource::<LastSnapshot<A>>()
             .add_message::<ConfigRefresh<A::Config>>()
+            .add_message::<ConfigRemoved<A::Config>>()
             .add_systems(
                 Update,
                 (
                     crate::binding::config_binding_registry_system::<A>,
+                    crate::binding::config_binding_cleanup_system::<A>,
                     crate::core::hmr_core_system::<A>,
                     crate::debounce::flush_debounced_refresh::<A>,
                 )
@@ -265,7 +304,7 @@ impl ConfigHmrAppExt for App {
             .add_systems(
                 Update,
                 crate::core::cache_validation_system::<A>.run_if(
-                    bevy::time::common_conditions::on_timer(Duration::from_secs(5)),
+                    bevy::time::common_conditions::on_timer(Duration::from_secs(30)),
                 ),
             );
 
@@ -289,6 +328,45 @@ impl ConfigHmrAppExt for App {
             .should_update = ShouldUpdateMessages::Always;
         self
     }
+
+    fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self, path: &str) -> &mut Self {
+        use crate::watcher::{
+            AssetBindCache, asset_bind_cleanup_system, asset_bind_registry_system,
+            asset_watcher_system,
+        };
+
+        // Per-type resources for entity binding tracking.
+        self.init_resource::<AssetBindCache<A>>();
+
+        // Register the AssetChanged<A> message.
+        self.add_message::<crate::watcher::AssetChanged<A>>();
+
+        // Systems: registry -> cleanup -> watcher, chained every frame.
+        self.add_systems(
+            Update,
+            (
+                asset_bind_registry_system::<A>,
+                asset_bind_cleanup_system::<A>,
+                asset_watcher_system::<A>,
+            )
+                .chain(),
+        );
+
+        // Startup: load the asset and hold a strong handle so it isn't
+        // unloaded. We reuse ConfigHandle<A> (a generic handle-holder) for
+        // convenience — it doesn't require HmrSource, only Asset.
+        let path_owned = path.to_string();
+        self.add_systems(
+            Startup,
+            move |asset_server: Res<bevy::asset::AssetServer>, mut commands: Commands| {
+                let handle = asset_server.load::<A>(&path_owned);
+                commands.insert_resource(ConfigHandle::<A> { _handle: handle });
+                bevy::log::info!("[HMR] watching asset: {} -> {}", A::type_path(), path_owned);
+            },
+        );
+
+        self
+    }
 }
 
 /// Startup 系统：从 `ConfigPathRegistry` 读取 `A` 对应的 path，
@@ -308,11 +386,12 @@ pub fn load_config_at_startup<A: HmrSource>(
     if let Some(path) = path {
         let handle = asset_server.load::<A>(&path);
         commands.insert_resource(ConfigHandle::<A> { _handle: handle });
-        // 用 eprintln! 而非 info!，避免在无 TaskPool 的测试环境里 panic
-        eprintln!("[HMR] registered config: {} -> {}", A::type_path(), path);
+        // tracing 宏在无 subscriber 时为空操作，不会 panic；无 LogPlugin
+        // 的测试环境也不会触发 IoTaskPool 依赖（bevy 0.19 已解耦）。
+        bevy::log::info!("[HMR] registered config: {} -> {}", A::type_path(), path);
     } else {
-        eprintln!(
-            "[HMR] warning: no path registered for {} (register_config not called?)",
+        bevy::log::warn!(
+            "[HMR] no path registered for {} (register_config not called?)",
             A::type_path()
         );
     }

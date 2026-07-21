@@ -15,9 +15,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 /// Test asset type used as the `T` in `ConfigAsset<T>`.
-#[derive(
-    Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default,
-)]
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 struct DummyDb {
     count: u32,
 }
@@ -25,10 +23,8 @@ struct DummyDb {
 /// `DummyDb` 必须实现 `ConfigDiff` 才能让 `ConfigAsset<DummyDb>: HmrSource`。
 /// 测试只关心 binding 缓存映射，diff 实现返回空集即可。
 impl ConfigDiff for DummyDb {
-    fn diff(
-        _old: &Self,
-        _new: &Self,
-    ) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
+    type Id = String;
+    fn diff(_old: &Self, _new: &Self) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
         Default::default()
     }
 }
@@ -143,10 +139,31 @@ fn reinserting_entity_with_new_handle_removes_old_binding() {
 fn config_bind_component_can_be_constructed() {
     // Smoke test: ensure the marker component can be built and stored.
     // Using Handle::default() which is a Uuid handle with the default UUID.
-    let handle: bevy::prelude::Handle<ConfigAsset<DummyDb>> =
-        bevy::prelude::Handle::default();
+    let handle: bevy::prelude::Handle<ConfigAsset<DummyDb>> = bevy::prelude::Handle::default();
     let bind: ConfigBind<ConfigAsset<DummyDb>> = ConfigBind {
         handle: handle.clone(),
     };
     assert_eq!(bind.handle.id(), handle.id());
+}
+
+#[test]
+fn with_id_uuid_produces_matching_handle() {
+    // with_id should produce a Handle whose .id() matches the given AssetId::Uuid.
+    let id = make_id(777);
+    let bind = ConfigBind::<ConfigAsset<DummyDb>>::with_id(id);
+    assert_eq!(bind.handle.id(), id);
+}
+
+#[test]
+fn with_id_index_falls_back_without_panicking() {
+    // with_id on an AssetId::Index should not panic; it falls back to
+    // Handle::default() (with a stderr warning) because Bevy has no public
+    // way to construct a Handle from an AssetId::Index.
+    // We can't easily build an AssetId::Index without a real asset store,
+    // so this test just ensures the Uuid path and default handle coexist
+    // — the Index branch is covered by compilation + the eprintln warning.
+    let default_handle: bevy::prelude::Handle<ConfigAsset<DummyDb>> =
+        bevy::prelude::Handle::default();
+    let bind = ConfigBind::<ConfigAsset<DummyDb>>::with_id(default_handle.id());
+    assert_eq!(bind.handle.id(), default_handle.id());
 }

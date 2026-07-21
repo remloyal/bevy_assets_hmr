@@ -9,22 +9,19 @@
 //!
 //! 适用场景：已有自定义 Asset + Loader 的项目，想在上面加 diff-based 热更新。
 
-use bevy::asset::{Asset, AssetId, AssetLoader, Assets, io::Reader, LoadContext};
+use bevy::asset::{Asset, AssetId, AssetLoader, Assets, LoadContext, io::Reader};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy_assets_hmr::{
-    ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh, HmrSource,
+    ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh, HmrSource, SimpleConfigDiff,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
 
 /// 关卡数据：用户自定义 Asset，直接作为 HMR 数据源。
-#[derive(
-    Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default,
-)]
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 struct LevelAsset {
     /// 关卡 id（用于 diff）
     id: String,
@@ -35,20 +32,9 @@ struct LevelAsset {
 }
 
 /// 单对象 diff：整体比较，变了就标记 "level" 为 modified。
-impl ConfigDiff for LevelAsset {
-    fn diff(
-        old: &Self,
-        new: &Self,
-    ) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
-        if old != new {
-            (
-                HashSet::new(),
-                HashSet::new(),
-                ["level".to_string()].into_iter().collect(),
-            )
-        } else {
-            (HashSet::new(), HashSet::new(), HashSet::new())
-        }
+impl SimpleConfigDiff for LevelAsset {
+    fn diff_id() -> &'static str {
+        "level"
     }
 }
 
@@ -84,12 +70,12 @@ impl AssetLoader for LevelAssetLoader {
         _load_context: &mut LoadContext<'_>,
     ) -> Result<Self::Asset, Self::Error> {
         let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await.map_err(|e| {
-            std::sync::Arc::new(LevelLoaderError::Io(e))
-        })?;
-        let asset = ron::de::from_bytes::<LevelAsset>(&bytes).map_err(|e| {
-            std::sync::Arc::new(LevelLoaderError::Ron(e))
-        })?;
+        reader
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| std::sync::Arc::new(LevelLoaderError::Io(e)))?;
+        let asset = ron::de::from_bytes::<LevelAsset>(&bytes)
+            .map_err(|e| std::sync::Arc::new(LevelLoaderError::Ron(e)))?;
         Ok(asset)
     }
 
@@ -105,9 +91,7 @@ fn on_level_refresh(mut reader: MessageReader<ConfigRefresh<LevelAsset>>) {
         println!("DiffKind: {:?}", refresh.diff_kind);
         println!(
             "新关卡: id={}, name={}, max_turns={}",
-            refresh.new_config.id,
-            refresh.new_config.name,
-            refresh.new_config.max_turns
+            refresh.new_config.id, refresh.new_config.name, refresh.new_config.max_turns
         );
     }
 }
@@ -142,6 +126,10 @@ fn simulate(
 struct LevelAssetId(AssetId<LevelAsset>);
 
 fn main() {
+    // AssetServer::load（由 register_asset 的 Startup 系统触发）需要 IoTaskPool。
+    use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
+
     let mut app = App::new();
     app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
 

@@ -4,8 +4,6 @@ use bevy::asset::Asset;
 use bevy::prelude::{Handle, Resource};
 use bevy::reflect::TypePath;
 
-use crate::core::HmrSource;
-
 /// Wraps a parsed config `T` together with its source path.
 ///
 /// `T` must be an `Asset` itself (Bevy 0.19 `Asset` derive requires this).
@@ -30,9 +28,12 @@ pub struct ConfigAsset<T: Asset + Send + Sync + 'static> {
 /// `bevy/file_watcher` reload 时 `AssetServer` 会更新此 Handle 指向的新版本。
 ///
 /// 在直接模式下，用户用自己的 `A` 类型插入 `ConfigHandle::<A>`。
+///
+/// `watch_asset` 模式下也用此 Resource 持有非 `HmrSource` 资产（如 `Image`）
+/// 的强引用。
 #[derive(Resource)]
 #[allow(dead_code)]
-pub struct ConfigHandle<A: HmrSource> {
+pub struct ConfigHandle<A: Asset> {
     /// 强引用 handle。字段下划线前缀避免 "field is never read" 警告——
     /// 它的存在本身就是作用（防止资产被回收）。
     pub _handle: Handle<A>,

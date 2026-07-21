@@ -21,10 +21,10 @@
 use crate::binding::HandleEntityCache;
 use crate::core::{HmrSource, LastSnapshot};
 use crate::diff::ConfigDiff;
-use crate::refresh::{ConfigRefresh, DiffKind};
-use bevy::asset::{Assets, AssetId};
+use crate::refresh::{ConfigRefresh, ConfigRemoved, DiffKind};
+use bevy::asset::{AssetId, Assets};
 use bevy::ecs::message::MessageWriter;
-use bevy::prelude::{Res, ResMut, Resource, Time};
+use bevy::prelude::{Res, ResMut, Resource};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -35,6 +35,12 @@ use std::time::{Duration, Instant};
 pub struct RefreshDebouncer<A: HmrSource> {
     /// Pending asset ids -> time of most recent event.
     pub pending: HashMap<AssetId<A>, Instant>,
+    /// Pending removed asset ids (debounced like `pending`).
+    ///
+    /// Populated by `hmr_core_system` on `AssetEvent::Removed` and flushed
+    /// by `flush_debounced_refresh` after the debounce window elapses,
+    /// dispatching [`crate::ConfigRemoved`] events.
+    pub pending_removed: HashMap<AssetId<A>, Instant>,
     /// Debounce window. Set by `App::register_config` from
     /// `ConfigHmrPlugin::debounce_window`.
     pub window: Duration,
@@ -44,17 +50,21 @@ impl<A: HmrSource> Default for RefreshDebouncer<A> {
     fn default() -> Self {
         Self {
             pending: HashMap::new(),
+            pending_removed: HashMap::new(),
             window: Duration::from_millis(150),
         }
     }
 }
 
 /// Enqueue a modified asset for debounced refresh. Called by `hmr_core_system`.
-pub(crate) fn enqueue<A: HmrSource>(
-    debouncer: &mut RefreshDebouncer<A>,
-    id: AssetId<A>,
-) {
+pub(crate) fn enqueue<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>, id: AssetId<A>) {
     debouncer.pending.insert(id, Instant::now());
+}
+
+/// Enqueue a removed asset for debounced `ConfigRemoved` dispatch.
+/// Called by `hmr_core_system` on `AssetEvent::Removed`.
+pub(crate) fn enqueue_removed<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>, id: AssetId<A>) {
+    debouncer.pending_removed.insert(id, Instant::now());
 }
 
 /// System: flush any pending refreshes whose debounce window has elapsed.
@@ -70,79 +80,138 @@ pub(crate) fn enqueue<A: HmrSource>(
 /// 6. Update `LastSnapshot<A>` to the new version.
 /// 7. Compute `target_entities` from `HandleEntityCache<A>`.
 /// 8. Dispatch `ConfigRefresh<A::Config>`.
+///
+/// Also flushes `pending_removed`: for each removed id whose window has
+/// elapsed, dispatches a [`crate::ConfigRemoved`] event (if a prior snapshot
+/// existed) and cleans up the snapshot.
 pub fn flush_debounced_refresh<A: HmrSource>(
-    time: Res<Time>,
     mut debouncer: ResMut<RefreshDebouncer<A>>,
     assets: Res<Assets<A>>,
     cache: Res<HandleEntityCache<A>>,
     mut snapshots: ResMut<LastSnapshot<A>>,
     mut refresh_evts: MessageWriter<ConfigRefresh<A::Config>>,
+    mut removed_evts: MessageWriter<ConfigRemoved<A::Config>>,
 ) {
-    if debouncer.pending.is_empty() {
+    let any_pending = !debouncer.pending.is_empty();
+    let any_removed = !debouncer.pending_removed.is_empty();
+    if !any_pending && !any_removed {
         return;
     }
-    let now = time.elapsed();
     let window = debouncer.window;
 
-    // Collect ids whose debounce window has elapsed.
-    let ready: Vec<_> = debouncer
-        .pending
-        .iter()
-        .filter(|(_, t)| {
-            let elapsed = Instant::now().duration_since(**t);
-            elapsed >= window || now.as_secs_f64() == 0.0 // First-frame safety
-        })
-        .map(|(id, _)| *id)
-        .collect();
+    // ---- 1. Flush pending removals first (they take precedence: a
+    // removed asset should not also produce a stale refresh). ----
+    if any_removed {
+        let ready_removed: Vec<_> = debouncer
+            .pending_removed
+            .iter()
+            .filter(|(_, t)| {
+                let elapsed = Instant::now().duration_since(**t);
+                elapsed >= window
+            })
+            .map(|(id, _)| *id)
+            .collect();
 
-    for id in ready {
-        debouncer.pending.remove(&id);
+        for id in ready_removed {
+            debouncer.pending_removed.remove(&id);
+            // A removed asset should not also be pending a refresh.
+            debouncer.pending.remove(&id);
 
-        let Some(new_asset) = assets.get(id) else {
-            // Asset was unloaded; drop the snapshot too.
-            snapshots.map.remove(&id);
-            continue;
-        };
+            // Only dispatch ConfigRemoved if we actually had a snapshot
+            // (i.e. the asset was known to subscribers). A remove event
+            // for an asset we never saw is a no-op.
+            let had_snapshot = snapshots.map.remove(&id).is_some();
+            let source_path = snapshots.source_paths.remove(&id).unwrap_or_default();
 
-        let new_raw = new_asset.config();
-
-        let (changed_ids, diff_kind) = match snapshots.map.get(&id) {
-            Some(old_raw) => {
-                let (added, removed, modified) = A::Config::diff(old_raw, new_raw);
-                let kind = DiffKind::from_counts(added.len(), removed.len(), modified.len());
-                let mut ids = added;
-                ids.extend(removed);
-                ids.extend(modified);
-                (ids, kind)
-            }
-            None => {
-                // First load: initialize the snapshot and skip dispatch.
-                // Subscribers should not see a spurious "first load" refresh.
-                snapshots.map.insert(id, new_raw.clone());
+            if !had_snapshot {
                 continue;
             }
-        };
 
-        // Update snapshot to the new version (regardless of whether we dispatch).
-        snapshots.map.insert(id, new_raw.clone());
+            let target_entities: Vec<_> = cache
+                .get_entities(&id)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
 
-        // Skip dispatch if nothing actually changed (e.g. same content re-inserted).
-        if changed_ids.is_empty() {
-            continue;
+            removed_evts.write(ConfigRemoved {
+                target_entities,
+                source_path,
+                _marker: std::marker::PhantomData,
+            });
         }
+    }
 
-        // Collect target_entities from the cache (may be empty for the
-        // data-table-via-Resource pattern).
-        let target_entities: Vec<_> = cache
-            .get_entities(&id)
-            .map(|s| s.iter().copied().collect())
-            .unwrap_or_default();
+    // ---- 2. Flush pending modifications / additions. ----
+    if any_pending {
+        // Collect ids whose debounce window has elapsed.
+        let ready: Vec<_> = debouncer
+            .pending
+            .iter()
+            .filter(|(_, t)| {
+                let elapsed = Instant::now().duration_since(**t);
+                elapsed >= window
+            })
+            .map(|(id, _)| *id)
+            .collect();
 
-        refresh_evts.write(ConfigRefresh {
-            new_config: new_raw.clone(),
-            target_entities,
-            changed_ids,
-            diff_kind,
-        });
+        for id in ready {
+            debouncer.pending.remove(&id);
+
+            let Some(new_asset) = assets.get(id) else {
+                // Asset was unloaded; drop the snapshot too. (If a
+                // `Removed` event arrives next frame, `pending_removed`
+                // handles the `ConfigRemoved` dispatch.)
+                snapshots.map.remove(&id);
+                snapshots.source_paths.remove(&id);
+                continue;
+            };
+
+            let new_raw = new_asset.config();
+
+            let (changed_ids, diff_kind) = match snapshots.map.get(&id) {
+                Some(old_raw) => {
+                    let (added, removed, modified) = A::Config::diff(old_raw, new_raw);
+                    let kind = DiffKind::from_counts(added.len(), removed.len(), modified.len());
+                    let mut ids = added;
+                    ids.extend(removed);
+                    ids.extend(modified);
+                    (ids, kind)
+                }
+                None => {
+                    // First load: initialize the snapshot and skip dispatch.
+                    // Subscribers should not see a spurious "first load" refresh.
+                    snapshots.map.insert(id, new_raw.clone());
+                    snapshots
+                        .source_paths
+                        .insert(id, new_asset.source_path().to_string());
+                    continue;
+                }
+            };
+
+            // Update snapshot to the new version (regardless of whether we dispatch).
+            snapshots.map.insert(id, new_raw.clone());
+            snapshots
+                .source_paths
+                .insert(id, new_asset.source_path().to_string());
+
+            // Skip dispatch if nothing actually changed (e.g. same content re-inserted).
+            if changed_ids.is_empty() {
+                continue;
+            }
+
+            // Collect target_entities from the cache (may be empty for the
+            // data-table-via-Resource pattern).
+            let target_entities: Vec<_> = cache
+                .get_entities(&id)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
+
+            refresh_evts.write(ConfigRefresh {
+                new_config: new_raw.clone(),
+                target_entities,
+                changed_ids,
+                diff_kind,
+                source_path: new_asset.source_path().to_string(),
+            });
+        }
     }
 }

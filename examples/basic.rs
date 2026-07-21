@@ -10,17 +10,13 @@ use bevy::asset::{Asset, AssetId, Assets, Handle};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy_assets_hmr::{
-    ConfigAsset, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh,
-};
+use bevy_assets_hmr::{ConfigAsset, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
 /// 一个简单的"NPC 数据表" Asset。
-#[derive(
-    Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff,
-)]
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff)]
 #[config_diff(field = "npcs", id = "id")]
 struct NpcDatabase {
     npcs: Vec<NpcEntry>,
@@ -128,6 +124,11 @@ fn simulate_file_change(
 struct SeedAssetId(AssetId<ConfigAsset<NpcDatabase>>);
 
 fn main() {
+    // AssetServer::load（由 register_config 的 Startup 系统触发）需要 IoTaskPool。
+    // 在无 DefaultPlugins 的 headless 示例中需手动初始化（0 线程即可）。
+    use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
+
     let mut app = App::new();
     app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
 

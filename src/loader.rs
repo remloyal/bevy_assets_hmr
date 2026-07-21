@@ -1,7 +1,7 @@
 //! Multi-format config loader supporting both `ron` and `json` by file extension.
 
 use crate::asset::ConfigAsset;
-use bevy::asset::{io::Reader, Asset, AssetLoader, LoadContext};
+use bevy::asset::{Asset, AssetLoader, LoadContext, io::Reader};
 use bevy::reflect::TypePath;
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
@@ -64,14 +64,16 @@ impl<T: Asset + DeserializeOwned + Send + Sync + 'static> AssetLoader for Config
             .to_lowercase();
 
         let raw: T = match ext.as_str() {
-            "ron" => ron::de::from_bytes(&bytes)
-                .map_err(|e| Arc::new(ConfigLoaderError::Ron(e)))?,
-            "json" => serde_json::from_slice(&bytes)
-                .map_err(|e| Arc::new(ConfigLoaderError::Json(e)))?,
+            "ron" => {
+                ron::de::from_bytes(&bytes).map_err(|e| Arc::new(ConfigLoaderError::Ron(e)))?
+            }
+            "json" => {
+                serde_json::from_slice(&bytes).map_err(|e| Arc::new(ConfigLoaderError::Json(e)))?
+            }
             other => {
                 return Err(Arc::new(ConfigLoaderError::UnsupportedExtension(
                     other.to_string(),
-                )))
+                )));
             }
         };
 

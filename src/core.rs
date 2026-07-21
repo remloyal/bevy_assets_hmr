@@ -25,7 +25,7 @@
 
 use crate::asset::ConfigAsset;
 use crate::binding::HandleEntityCache;
-use crate::debounce::{enqueue, RefreshDebouncer};
+use crate::debounce::{RefreshDebouncer, enqueue, enqueue_removed};
 use crate::diff::ConfigDiff;
 use bevy::asset::{Asset, AssetEvent, AssetId};
 use bevy::ecs::system::Query;
@@ -48,6 +48,15 @@ pub trait HmrSource: Asset + Send + Sync + 'static {
     type Config: ConfigDiff + Clone + Send + Sync + 'static;
     /// 从 Asset 提取 Config 引用。
     fn config(&self) -> &Self::Config;
+    /// 该资产对应的磁盘源路径（相对 `assets/`，如 `data/npc.ron`）。
+    ///
+    /// 用于在 [`crate::ConfigRefresh`] / [`crate::ConfigRemoved`] 事件中
+    /// 携带 `source_path`，方便订阅方做日志/调试。包装模式
+    ///（`ConfigAsset<T>`）自动返回 `&self.source_path`；直接模式下用户
+    /// 可按需 override（默认返回空字符串）。
+    fn source_path(&self) -> &str {
+        ""
+    }
 }
 
 /// Per-type snapshot of the last-seen `Config` value for each `AssetId<A>`.
@@ -60,12 +69,19 @@ pub trait HmrSource: Asset + Send + Sync + 'static {
 pub struct LastSnapshot<A: HmrSource> {
     /// `AssetId<A>` -> last-seen `A::Config` value.
     pub map: HashMap<AssetId<A>, A::Config>,
+    /// `AssetId<A>` -> last-known source path.
+    ///
+    /// Recorded whenever a snapshot is initialized or updated, so that
+    /// [`crate::ConfigRemoved`] events can still carry a `source_path`
+    /// after the asset itself is gone.
+    pub source_paths: HashMap<AssetId<A>, String>,
 }
 
 impl<A: HmrSource> Default for LastSnapshot<A> {
     fn default() -> Self {
         Self {
             map: HashMap::new(),
+            source_paths: HashMap::new(),
         }
     }
 }
@@ -92,17 +108,30 @@ pub fn hmr_core_system<A: HmrSource>(
             AssetEvent::Added { id } | AssetEvent::Modified { id } => {
                 enqueue::<A>(&mut debouncer, *id);
             }
+            AssetEvent::Removed { id } => {
+                // Asset was explicitly removed (e.g. file deleted, or
+                // `Assets::remove` called). Enqueue a `ConfigRemoved`
+                // dispatch so subscribers can do cleanup.
+                enqueue_removed::<A>(&mut debouncer, *id);
+            }
             _ => {}
         }
     }
 }
 
-/// System: periodic cache validation.
+/// System: periodic cache validation (drift correction).
 ///
-/// Runs every 5 seconds (via `on_timer`). Walks all entities that currently
+/// Runs every 30 seconds (via `on_timer`). Walks all entities that currently
 /// have a `ConfigBind<A>` component and ensures the cache reflects truth.
-/// This catches any drift caused by direct mutation of `ConfigBind<A>`
-/// outside the auto-registration path.
+///
+/// This is a **safety net**, not the primary update path. The hot path is:
+/// - `config_binding_registry_system` — incremental `Changed<ConfigBind<A>>`
+/// - `config_binding_cleanup_system` — incremental `RemovedComponents`
+///
+/// This system only catches drift caused by direct mutation of
+/// `ConfigBind<A>` outside those paths (e.g. `world.entity_mut(e).insert(..)`
+/// bypassing `Changed` detection in rare edge cases). The 30 s interval keeps
+/// the O(n) full scan cost low while bounding worst-case drift duration.
 pub fn cache_validation_system<A: HmrSource>(
     mut cache: ResMut<HandleEntityCache<A>>,
     bindings: Query<(bevy::prelude::Entity, &crate::binding::ConfigBind<A>)>,
@@ -129,15 +158,16 @@ pub fn cache_validation_system<A: HmrSource>(
 /// [`HmrSource`] directly on your asset type instead.
 pub trait HmrAsset: Asset + ConfigDiff + Clone + DeserializeOwned + Send + Sync + 'static {}
 
-impl<T> HmrAsset for T where
-    T: Asset + ConfigDiff + Clone + DeserializeOwned + Send + Sync + 'static,
-{
-}
+impl<T> HmrAsset for T where T: Asset + ConfigDiff + Clone + DeserializeOwned + Send + Sync + 'static
+{}
 
 /// 包装模式：`ConfigAsset<T>` 自动实现 `HmrSource`，配置类型就是 `T` 本身。
 impl<T: HmrAsset> HmrSource for ConfigAsset<T> {
     type Config = T;
     fn config(&self) -> &T {
         &self.raw
+    }
+    fn source_path(&self) -> &str {
+        &self.source_path
     }
 }

@@ -11,34 +11,24 @@ use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy_assets_hmr::{
-    ConfigAsset, ConfigBind, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh,
-    HandleEntityCache,
+    ConfigAsset, ConfigBind, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh, HandleEntityCache,
+    SimpleConfigDiff,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
 
 /// UI 主题配置（单文件单对象，diff 简化为"整体修改"）。
-#[derive(
-    Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default,
-)]
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 struct UiTheme {
     bg_color: String,
     text_color: String,
     font_size: u32,
 }
 
-impl ConfigDiff for UiTheme {
-    fn diff(
-        old: &Self,
-        new: &Self,
-    ) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
-        if old != new {
-            (HashSet::new(), HashSet::new(), ["theme".to_string()].into_iter().collect())
-        } else {
-            (HashSet::new(), HashSet::new(), HashSet::new())
-        }
+impl SimpleConfigDiff for UiTheme {
+    fn diff_id() -> &'static str {
+        "theme"
     }
 }
 
@@ -114,13 +104,15 @@ fn simulate(
             text_color: "white".into(),
             font_size: 16,
         };
-        let old_theme = snapshots
-            .map
-            .get(&theme_id.0)
-            .cloned()
-            .expect("快照应存在");
-        println!("  旧主题: bg={}, size={}", old_theme.bg_color, old_theme.font_size);
-        println!("  新主题: bg={}, size={}", new_theme.bg_color, new_theme.font_size);
+        let old_theme = snapshots.map.get(&theme_id.0).cloned().expect("快照应存在");
+        println!(
+            "  旧主题: bg={}, size={}",
+            old_theme.bg_color, old_theme.font_size
+        );
+        println!(
+            "  新主题: bg={}, size={}",
+            new_theme.bg_color, new_theme.font_size
+        );
 
         let _ = assets.insert(
             theme_id.0,
@@ -138,6 +130,10 @@ fn simulate(
 }
 
 fn main() {
+    // AssetServer::load（由 register_config 的 Startup 系统触发）需要 IoTaskPool。
+    use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
+
     let mut app = App::new();
     app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
 

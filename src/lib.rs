@@ -8,16 +8,13 @@
 //! # Quick start
 //! ```no_run
 //! use bevy::prelude::*;
-//! use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, ConfigDiff};
-//! use std::collections::HashSet;
+//! use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, SimpleConfigDiff};
 //! # use bevy::asset::Asset;
 //! # use bevy::reflect::TypePath;
 //! # use serde::{Deserialize, Serialize};
 //! # #[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 //! # struct MyDb;
-//! # impl ConfigDiff for MyDb {
-//! #     fn diff(_old: &Self, _new: &Self) -> (HashSet<String>, HashSet<String>, HashSet<String>) { Default::default() }
-//! # }
+//! # impl SimpleConfigDiff for MyDb {}
 //!
 //! let mut app = App::new();
 //! app.add_plugins(MinimalPlugins);
@@ -37,16 +34,23 @@ mod ext;
 mod loader;
 mod refresh;
 mod registry;
+mod watcher;
 
 pub use asset::{ConfigAsset, ConfigHandle};
-pub use binding::{config_binding_registry_system, ConfigBind, HandleEntityCache};
-pub use core::{cache_validation_system, hmr_core_system, HmrAsset, HmrSource, LastSnapshot};
-pub use debounce::{flush_debounced_refresh, RefreshDebouncer};
-pub use diff::ConfigDiff;
+pub use binding::{
+    ConfigBind, HandleEntityCache, config_binding_cleanup_system, config_binding_registry_system,
+};
+pub use core::{HmrAsset, HmrSource, LastSnapshot, cache_validation_system, hmr_core_system};
+pub use debounce::{RefreshDebouncer, flush_debounced_refresh};
+pub use diff::{ConfigDiff, SimpleConfigDiff};
 pub use ext::ConfigHmrAppExt;
 pub use loader::ConfigLoader;
-pub use refresh::{ConfigRefresh, DiffKind};
+pub use refresh::{ConfigRefresh, ConfigRemoved, DiffKind};
 pub use registry::ConfigPathRegistry;
+pub use watcher::{
+    AssetBind, AssetBindCache, AssetChanged, asset_bind_cleanup_system, asset_bind_registry_system,
+    asset_watcher_system,
+};
 
 // Re-export derive macro，让用户 `use bevy_assets_hmr::ConfigDiff` 同时
 // 获得 trait 和 `#[derive(ConfigDiff)]` 能力（Rust 允许 derive macro 和

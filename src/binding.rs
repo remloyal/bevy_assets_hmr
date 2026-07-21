@@ -43,14 +43,34 @@ impl<A: HmrSource> ConfigBind<A> {
     /// `AssetServer::load`) and need `ConfigBind.handle.id()` to match
     /// a known id.
     ///
-    /// For `AssetId::Index`, falls back to `Handle::default()` (which won't
-    /// match - prefer `ConfigBind::new` with a real handle in that case).
+    /// **Limitation**: Bevy's `Handle` only has `Strong` and `Uuid`
+    /// variants — there is no public way to construct a `Handle` from an
+    /// `AssetId::Index` without going through `Assets` (which owns the
+    /// `Arc<StrongHandle>`). For `AssetId::Index`, this falls back to
+    /// `Handle::default()` (a Uuid handle with the default UUID) and logs a
+    /// warning to stderr, because the resulting bind will never match the
+    /// intended asset. Prefer [`ConfigBind::new`] with a real strong handle
+    /// (e.g. obtained from `Assets::get` or `AssetServer::load`) when you
+    /// have an `AssetId::Index`.
     pub fn with_id(id: AssetId<A>) -> Self {
         let handle = match id {
             AssetId::Uuid { uuid } => {
                 bevy::prelude::Handle::<A>::Uuid(uuid, std::marker::PhantomData)
             }
-            _ => bevy::prelude::Handle::default(),
+            AssetId::Index { .. } => {
+                // Bevy has no public constructor for a Handle from an
+                // AssetId::Index (it requires the internal Arc<StrongHandle>
+                // owned by Assets). Emit a warning so callers aren't left
+                // guessing why their bind silently fails to match.
+                bevy::log::warn!(
+                    "[HMR] ConfigBind::with_id received AssetId::Index for {}, \
+                     which cannot be converted to a matching Handle. \
+                     Falling back to Handle::default() (the bind will NOT match \
+                     this asset). Use ConfigBind::new with a real handle instead.",
+                    A::type_path()
+                );
+                bevy::prelude::Handle::default()
+            }
         };
         Self { handle }
     }
@@ -91,7 +111,10 @@ impl<A: HmrSource> HandleEntityCache<A> {
                 }
             }
         }
-        self.handle_to_entities.entry(handle).or_default().insert(entity);
+        self.handle_to_entities
+            .entry(handle)
+            .or_default()
+            .insert(entity);
     }
 
     /// Look up all entities bound to the given handle.
@@ -129,5 +152,26 @@ pub fn config_binding_registry_system<A: HmrSource>(
 ) {
     for (entity, bind) in bindings.iter() {
         cache.insert(entity, bind.handle.id());
+    }
+}
+
+/// System: remove despawned entities from [`HandleEntityCache<A>`].
+///
+/// `RemovedComponents<ConfigBind<A>>` yields entities whose `ConfigBind<A>`
+/// component was removed since the last time this system ran. This covers
+/// both explicit component removal and full entity despawn. Without this
+/// system, the cache would retain dangling `entity → handle` mappings for
+/// up to 5 seconds (until `cache_validation_system` eventually rebuilds),
+/// causing `target_entities` in [`crate::ConfigRefresh`] to reference
+/// non-existent entities in the interim.
+///
+/// Runs every frame as part of the HMR pipeline, chained after
+/// `config_binding_registry_system`.
+pub fn config_binding_cleanup_system<A: HmrSource>(
+    mut cache: bevy::prelude::ResMut<HandleEntityCache<A>>,
+    mut removed: bevy::prelude::RemovedComponents<ConfigBind<A>>,
+) {
+    for entity in removed.read() {
+        cache.remove(entity);
     }
 }

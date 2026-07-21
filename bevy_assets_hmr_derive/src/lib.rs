@@ -29,7 +29,9 @@
 //!
 //! # 约束
 //!
-//! - 数据库类型必须实现 `PartialEq`（检测 modified 条目）
+//! - **Struct**: 数据库类型必须实现 `PartialEq`（检测 modified 条目）
+//! - **Enum**: 枚举类型必须实现 `PartialEq`；diff 用整体比较，变了则将类型名
+//!   作为 modified id
 //! - entry 的 id 字段类型必须是 `String`
 //! - `field` 指定 `Vec<Entry>` 字段名；省略时自动找第一个 `Vec<_>` 字段
 //! - `id` 指定 entry 的 id 字段名；省略时默认 `"id"`
@@ -73,48 +75,90 @@ impl syn::parse::Parse for ConfigDiffAttr {
 pub fn derive_config_diff(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let crate_path = quote! { bevy_assets_hmr };
-
-    let field = match resolve_field(&input) {
-        Ok(f) => f,
-        Err(e) => return e.to_compile_error().into(),
-    };
-    let id_field = resolve_id(&input).unwrap_or_else(|| Ident::new("id", proc_macro2::Span::call_site()));
     let db_name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    let expanded: TokenStream2 = {
-        let field_ident = &field;
-        let id_ident = &id_field;
-        quote! {
-            impl #impl_generics #crate_path::ConfigDiff for #db_name #ty_generics #where_clause {
-                fn diff(
-                    old: &Self,
-                    new: &Self,
-                ) -> (
-                    std::collections::HashSet<String>,
-                    std::collections::HashSet<String>,
-                    std::collections::HashSet<String>,
-                ) {
-                    use std::collections::HashSet;
-                    let old_ids: HashSet<String> =
-                        old.#field_ident.iter().map(|e| e.#id_ident.clone()).collect();
-                    let new_ids: HashSet<String> =
-                        new.#field_ident.iter().map(|e| e.#id_ident.clone()).collect();
-                    let added: HashSet<String> =
-                        new_ids.difference(&old_ids).cloned().collect();
-                    let removed: HashSet<String> =
-                        old_ids.difference(&new_ids).cloned().collect();
-                    let modified: HashSet<String> = old_ids
-                        .intersection(&new_ids)
-                        .filter(|id| {
-                            old.#field_ident.iter().find(|e| &e.#id_ident == *id)
-                                != new.#field_ident.iter().find(|e| &e.#id_ident == *id)
-                        })
-                        .cloned()
-                        .collect();
-                    (added, removed, modified)
+    let expanded: TokenStream2 = match &input.data {
+        syn::Data::Struct(_) => {
+            // Existing Vec<Entry> field-based diff.
+            let field = match resolve_field(&input) {
+                Ok(f) => f,
+                Err(e) => return e.to_compile_error().into(),
+            };
+            let id_field = resolve_id(&input).unwrap_or_else(|| {
+                Ident::new("id", proc_macro2::Span::call_site())
+            });
+            let field_ident = &field;
+            let id_ident = &id_field;
+            quote! {
+                impl #impl_generics #crate_path::ConfigDiff for #db_name #ty_generics #where_clause {
+                    type Id = String;
+                    fn diff(
+                        old: &Self,
+                        new: &Self,
+                    ) -> (
+                        std::collections::HashSet<String>,
+                        std::collections::HashSet<String>,
+                        std::collections::HashSet<String>,
+                    ) {
+                        use std::collections::HashSet;
+                        let old_ids: HashSet<String> =
+                            old.#field_ident.iter().map(|e| e.#id_ident.clone()).collect();
+                        let new_ids: HashSet<String> =
+                            new.#field_ident.iter().map(|e| e.#id_ident.clone()).collect();
+                        let added: HashSet<String> =
+                            new_ids.difference(&old_ids).cloned().collect();
+                        let removed: HashSet<String> =
+                            old_ids.difference(&new_ids).cloned().collect();
+                        let modified: HashSet<String> = old_ids
+                            .intersection(&new_ids)
+                            .filter(|id| {
+                                old.#field_ident.iter().find(|e| &e.#id_ident == *id)
+                                    != new.#field_ident.iter().find(|e| &e.#id_ident == *id)
+                            })
+                            .cloned()
+                            .collect();
+                        (added, removed, modified)
+                    }
                 }
             }
+        }
+        syn::Data::Enum(_) => {
+            // Enum: whole-value comparison via PartialEq. If old != new,
+            // report the type name as the single modified id; otherwise
+            // return an empty diff. This mirrors the manual "single config
+            // object" pattern (e.g. `UiTheme`, `LevelAsset`).
+            let type_name = db_name.to_string();
+            quote! {
+                impl #impl_generics #crate_path::ConfigDiff for #db_name #ty_generics #where_clause {
+                    type Id = String;
+                    fn diff(
+                        old: &Self,
+                        new: &Self,
+                    ) -> (
+                        std::collections::HashSet<String>,
+                        std::collections::HashSet<String>,
+                        std::collections::HashSet<String>,
+                    ) {
+                        use std::collections::HashSet;
+                        if old != new {
+                            let mut modified: HashSet<String> = HashSet::new();
+                            modified.insert(#type_name.to_string());
+                            (HashSet::new(), HashSet::new(), modified)
+                        } else {
+                            (HashSet::new(), HashSet::new(), HashSet::new())
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            return syn::Error::new(
+                input.ident.span(),
+                "ConfigDiff only supports structs and enums",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -138,7 +182,8 @@ fn resolve_field(input: &DeriveInput) -> syn::Result<Ident> {
         _ => {
             return Err(syn::Error::new(
                 input.ident.span(),
-                "ConfigDiff only supports structs",
+                "ConfigDiff: field-based diff requires a struct with a Vec<_> field \
+                 (enums use whole-value PartialEq diff; did you mean to derive on an enum?)",
             ))
         }
     };
