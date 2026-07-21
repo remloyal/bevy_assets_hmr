@@ -298,7 +298,7 @@ fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
 | `register_config::<T>(path)` | 包装 | 注册 ConfigLoader + 资源 + 系统 + 自动加载 + 持有 handle |
 | `register_asset::<A>(path)` | 直接 | 只注册资源 + 系统 + 自动加载 + 持有 handle（用户自己注册 loader） |
 | `insert_config::<T>(id, raw, path)` | 包装 | 直接注入数据（测试/headless 用） |
-| `watch_asset::<A>(path)` | 通用 | 监听任意 Asset（Image/Scene/Audio 等），无需 `ConfigDiff` |
+| `watch_asset::<A>()` | 通用 | 注册实体追踪 + 变更通知，无 `ConfigDiff` 要求（用户自己 load） |
 | `setup_hmr_headless()` | 通用 | 配置 headless 环境（无渲染世界时启用 Messages 缓冲交换） |
 
 ### 两种模式对比
@@ -350,19 +350,25 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins) // 启用 bevy/file_watcher
         .add_plugins(ConfigHmrPlugin::default())
-        // 一行监听任意 Asset 类型
-        .watch_asset::<Image>("textures/player.png")
-        .watch_asset::<Scene>("models/character.gltf#Scene0")
-        .watch_asset::<AudioSource>("audio/bgm.ogg")
+        // 一行声明要追踪的类型（不加载文件，只注册基础设施）
+        .watch_asset::<Image>()
+        .watch_asset::<Scene>()
         .add_systems(Update, on_image_changed)
+        .add_systems(Startup, setup)
         .run();
+}
+
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let handle = asset_server.load::<Image>("textures/player.png");
+    commands.spawn((
+        Sprite::from_image(handle.clone()),
+        AssetBind::new(handle),  // HMR 自动追踪，变更时填充 target_entities
+    ));
 }
 
 fn on_image_changed(mut reader: MessageReader<AssetChanged<Image>>) {
     for evt in reader.read() {
-        println!("图片 {} 已更新，{} 个实体受影响",
-            evt.asset_id, evt.target_entities.len());
-        // evt.new_asset: Image（AssetServer 已重载 + GPU 上传完毕）
+        info!("图片已更新，{} 个实体受影响", evt.target_entities.len());
     }
 }
 ```

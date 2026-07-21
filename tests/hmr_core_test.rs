@@ -545,9 +545,8 @@ fn make_watch_app() -> App {
     app.init_asset::<DummyTexture>();
     app.insert_resource(CapturedAssetChanged::default());
     app.add_systems(Update, capture_asset_changed_system);
-    // watch_asset normally loads a file in Startup; for testing we skip that
-    // and insert assets directly, so pass a dummy path.
-    app.watch_asset::<DummyTexture>("textures/dummy.png");
+    // watch_asset only registers infrastructure; user loads assets themselves.
+    app.watch_asset::<DummyTexture>();
     app
 }
 

@@ -169,6 +169,7 @@ pub trait ConfigHmrAppExt {
     /// - register a `ConfigLoader` (use your own loader / Bevy's built-ins)
     /// - create a `LastSnapshot` or `RefreshDebouncer` (no diff/debounce)
     /// - dispatch `ConfigRefresh` / `ConfigRemoved`
+    /// - load any file (you call `asset_server.load::<A>(path)` yourself)
     ///
     /// You **must** call `app.init_asset::<A>()` yourself (or use
     /// `DefaultPlugins` which handles it for built-in types).
@@ -177,14 +178,17 @@ pub trait ConfigHmrAppExt {
     /// ```ignore
     /// // Requires `bevy/file_watcher` feature + a real asset type like Image.
     /// use bevy::prelude::*;
-    /// use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin};
+    /// use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, AssetBind};
     /// let mut app = App::new();
     /// app.add_plugins(DefaultPlugins); // enables bevy/file_watcher
     /// app.add_plugins(ConfigHmrPlugin::default());
-    /// app.watch_asset::<Image>("textures/player.png");
+    /// app.watch_asset::<Image>();
+    /// // Then, wherever you load:
+    /// let handle = asset_server.load::<Image>("textures/player.png");
+    /// commands.spawn((Sprite::from_image(handle.clone()), AssetBind::new(handle)));
     /// // Subscribe via MessageReader<AssetChanged<Image>> in your system.
     /// ```
-    fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self, path: &str) -> &mut Self;
+    fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self) -> &mut Self;
 }
 
 impl ConfigHmrAppExt for App {
@@ -340,7 +344,7 @@ impl ConfigHmrAppExt for App {
         self
     }
 
-    fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self, path: &str) -> &mut Self {
+    fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self) -> &mut Self {
         use crate::watcher::{
             AssetBindCache, asset_bind_cleanup_system, asset_bind_registry_system,
             asset_watcher_system,
@@ -365,19 +369,6 @@ impl ConfigHmrAppExt for App {
                     .chain(),
             );
         }
-
-        // Startup: load the asset and hold a strong handle so it isn't
-        // unloaded. We reuse ConfigHandle<A> (a generic handle-holder) for
-        // convenience — it doesn't require HmrSource, only Asset.
-        let path_owned = path.to_string();
-        self.add_systems(
-            Startup,
-            move |asset_server: Res<bevy::asset::AssetServer>, mut commands: Commands| {
-                let handle = asset_server.load::<A>(&path_owned);
-                commands.insert_resource(ConfigHandle::<A> { _handle: handle });
-                bevy::log::info!("[HMR] watching asset: {} -> {}", A::type_path(), path_owned);
-            },
-        );
 
         self
     }
