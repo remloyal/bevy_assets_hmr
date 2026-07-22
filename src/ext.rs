@@ -29,7 +29,14 @@ use bevy::app::App;
 use bevy::asset::{AssetId, Assets};
 use bevy::ecs::message::{MessageRegistry, ShouldUpdateMessages};
 use bevy::prelude::*;
+use std::marker::PhantomData;
 use std::time::Duration;
+
+#[derive(Resource)]
+struct HmrTypeInstalled<A: Asset>(PhantomData<A>);
+
+#[derive(Resource)]
+struct HmrStartupRegistered<A: Asset>(PhantomData<A>);
 
 /// App extension trait for ergonomic HMR setup.
 ///
@@ -344,9 +351,9 @@ impl ConfigHmrAppExt for App {
     }
 }
 
-/// Startup 系统：从 `ConfigPathRegistry` 读取 `A` 对应的 path，
+/// Startup 系统：从 `ConfigPathRegistry` 读取 `A` 对应的全部 paths，
 /// 通过 `AssetServer` 加载文件，并用 `ConfigHandle<A>` Resource 持有
-/// 强引用 handle 防止资产被回收。
+/// 强引用 handles 防止资产被回收。
 ///
 /// 由 [`App::register_config`](ConfigHmrAppExt::register_config) 自动注册
 /// （包装模式下 `A = ConfigAsset<T>`），用户无需手动调用。直接模式下
@@ -355,32 +362,34 @@ impl ConfigHmrAppExt for App {
 pub fn load_config_at_startup<A: HmrSource>(
     asset_server: Res<bevy::asset::AssetServer>,
     registry: Res<ConfigPathRegistry>,
-    commands: Commands,
+    mut commands: Commands,
     existing: Option<Res<ConfigHandle<A>>>,
 ) {
-    // 如果 `ConfigHandle<A>` 已存在（由 `take_over_handle` 提前插入），
-    // 跳过自动加载——`bevy_asset_loader` 已经加载了文件并持有 handle。
-    if existing.is_some() {
-        bevy::log::debug!(
-            "[HMR] {} already has a ConfigHandle (take_over_handle?), skipping auto-load",
-            A::type_path()
-        );
-        return;
-    }
-    let path = registry.paths.get(A::type_path()).cloned();
-    let Some(path) = path else {
+    // `take_over_handle` means another loader already owns the handles.
+    let paths = registry
+        .paths
+        .get(A::type_path())
+        .cloned()
+        .unwrap_or_default();
+    if paths.is_empty() {
         bevy::log::warn!(
             "[HMR] no path registered for {} (register_config not called?)",
             A::type_path()
         );
         return;
-    };
-    let mut commands = commands;
-    let handle = asset_server.load::<A>(&path);
-    commands.insert_resource(ConfigHandle::<A> { _handle: handle });
+    }
+    let mut holder = existing
+        .map(|resource| (*resource).clone())
+        .unwrap_or_else(|| ConfigHandle {
+            handles: Vec::new(),
+        });
+    for path in paths {
+        holder.push(asset_server.load::<A>(&path));
+        bevy::log::info!("[HMR] registered config: {} -> {}", A::type_path(), path);
+    }
+    commands.insert_resource(holder);
     // tracing 宏在无 subscriber 时为空操作，不会 panic；无 LogPlugin
     // 的测试环境也不会触发 IoTaskPool 依赖（bevy 0.19 已解耦）。
-    bevy::log::info!("[HMR] registered config: {} -> {}", A::type_path(), path);
 }
 
 // ===========================================================================
@@ -392,28 +401,34 @@ pub fn load_config_at_startup<A: HmrSource>(
 ///
 /// 设为 `pub` 是因为 `#[derive(HmrAutoWatch)]` 宏需要跨 crate 调用它。
 pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bool) {
+    let asset_type_installed = app
+        .world()
+        .get_resource::<HmrTypeInstalled<ConfigAsset<T>>>()
+        .is_some();
     let debounce_window = app
         .world()
         .get_resource::<HmrSettings>()
         .map(|s| s.debounce_window)
         .unwrap_or_else(|| Duration::from_millis(150));
 
-    app.register_asset_loader(ConfigLoader::<T>::default())
-        .init_asset::<ConfigAsset<T>>()
-        .init_asset::<T>()
-        .init_resource::<HandleEntityCache<ConfigAsset<T>>>()
-        .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
-        .init_resource::<LastSnapshot<ConfigAsset<T>>>()
-        .init_resource::<crate::view::AssetRevision<ConfigAsset<T>>>()
-        .add_message::<ConfigRefresh<T>>()
-        .add_message::<ConfigRemoved<T>>()
-        .add_message::<ConfigReloadFailed<T>>()
-        .add_message::<crate::view::ConfigViewSync<ConfigAsset<T>>>();
+    if !asset_type_installed {
+        app.register_asset_loader(ConfigLoader::<T>::default())
+            .init_asset::<ConfigAsset<T>>()
+            .init_asset::<T>()
+            .init_resource::<HandleEntityCache<ConfigAsset<T>>>()
+            .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
+            .init_resource::<LastSnapshot<ConfigAsset<T>>>()
+            .init_resource::<crate::view::AssetRevision<ConfigAsset<T>>>()
+            .add_message::<ConfigRefresh<T>>()
+            .add_message::<ConfigRemoved<T>>()
+            .add_message::<ConfigReloadFailed<T>>()
+            .add_message::<crate::view::ConfigViewSync<ConfigAsset<T>>>();
+    }
 
     init_shared_dependency_resources(app);
 
     #[cfg(feature = "dev")]
-    {
+    if !asset_type_installed {
         app.add_systems(
             Update,
             (
@@ -444,11 +459,19 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
 
     app.world_mut()
         .resource_mut::<ConfigPathRegistry>()
-        .paths
-        .insert(ConfigAsset::<T>::type_path().to_string(), path.to_string());
+        .register(ConfigAsset::<T>::type_path().to_string(), path);
 
-    if autoload {
+    if !asset_type_installed {
+        app.insert_resource(HmrTypeInstalled::<ConfigAsset<T>>(PhantomData));
+    }
+
+    let startup_registered = app
+        .world()
+        .get_resource::<HmrStartupRegistered<ConfigAsset<T>>>()
+        .is_some();
+    if autoload && !startup_registered {
         app.add_systems(Startup, load_config_at_startup::<ConfigAsset<T>>);
+        app.insert_resource(HmrStartupRegistered::<ConfigAsset<T>>(PhantomData));
     }
 }
 
@@ -456,25 +479,28 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
 ///
 /// 设为 `pub` 是因为 `#[derive(HmrAutoWatch)]` 宏需要跨 crate 调用它。
 pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bool) {
+    let asset_type_installed = app.world().get_resource::<HmrTypeInstalled<A>>().is_some();
     let debounce_window = app
         .world()
         .get_resource::<HmrSettings>()
         .map(|s| s.debounce_window)
         .unwrap_or_else(|| Duration::from_millis(150));
 
-    app.init_resource::<HandleEntityCache<A>>()
-        .init_resource::<RefreshDebouncer<A>>()
-        .init_resource::<LastSnapshot<A>>()
-        .init_resource::<crate::view::AssetRevision<A>>()
-        .add_message::<ConfigRefresh<A::Config>>()
-        .add_message::<ConfigRemoved<A::Config>>()
-        .add_message::<ConfigReloadFailed<A::Config>>()
-        .add_message::<crate::view::ConfigViewSync<A>>();
+    if !asset_type_installed {
+        app.init_resource::<HandleEntityCache<A>>()
+            .init_resource::<RefreshDebouncer<A>>()
+            .init_resource::<LastSnapshot<A>>()
+            .init_resource::<crate::view::AssetRevision<A>>()
+            .add_message::<ConfigRefresh<A::Config>>()
+            .add_message::<ConfigRemoved<A::Config>>()
+            .add_message::<ConfigReloadFailed<A::Config>>()
+            .add_message::<crate::view::ConfigViewSync<A>>();
+    }
 
     init_shared_dependency_resources(app);
 
     #[cfg(feature = "dev")]
-    {
+    if !asset_type_installed {
         app.add_systems(
             Update,
             (
@@ -503,11 +529,19 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
 
     app.world_mut()
         .resource_mut::<ConfigPathRegistry>()
-        .paths
-        .insert(A::type_path().to_string(), path.to_string());
+        .register(A::type_path().to_string(), path);
 
-    if autoload {
+    if !asset_type_installed {
+        app.insert_resource(HmrTypeInstalled::<A>(PhantomData));
+    }
+
+    let startup_registered = app
+        .world()
+        .get_resource::<HmrStartupRegistered<A>>()
+        .is_some();
+    if autoload && !startup_registered {
         app.add_systems(Startup, load_config_at_startup::<A>);
+        app.insert_resource(HmrStartupRegistered::<A>(PhantomData));
     }
 }
 
@@ -546,7 +580,12 @@ pub fn take_over_handle<A: HmrSource>(app: &mut App, handle: Handle<A>, source_p
     let id = handle.id();
 
     // 持有强引用
-    app.insert_resource(ConfigHandle::<A> { _handle: handle });
+    let mut handles = app
+        .world_mut()
+        .remove_resource::<ConfigHandle<A>>()
+        .unwrap_or_else(|| ConfigHandle::new(handle.clone()));
+    handles.push(handle.clone());
+    app.insert_resource(handles);
 
     // 预热快照：若资产已加载则立即记录，避免首次 Added 派发伪刷新。
     if let Some(asset) = app
@@ -585,7 +624,11 @@ pub fn adopt_handle<A: HmrSource>(
     let id = handle.id();
 
     // 持有强引用
-    world.insert_resource(ConfigHandle::<A> { _handle: handle });
+    let mut handles = world
+        .remove_resource::<ConfigHandle<A>>()
+        .unwrap_or_else(|| ConfigHandle::new(handle.clone()));
+    handles.push(handle.clone());
+    world.insert_resource(handles);
 
     // 预热快照：若资产已加载则立即记录，避免首次 Added 派发伪刷新。
     if let Some(asset) = world

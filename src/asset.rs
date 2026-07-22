@@ -23,7 +23,8 @@ pub struct ConfigAsset<T: Asset + Send + Sync + 'static> {
 ///
 /// `App::register_config::<T>(path)` 自动加载文件并插入
 /// `ConfigHandle::<ConfigAsset<T>>` Resource，用户无需手动
-/// `asset_server.load` + 持有 handle。
+/// `asset_server.load` + 持有 handle。多次注册同一类型会保留所有去重后的
+/// handles。
 ///
 /// `bevy/file_watcher` reload 时 `AssetServer` 会更新此 Handle 指向的新版本。
 ///
@@ -34,7 +35,34 @@ pub struct ConfigAsset<T: Asset + Send + Sync + 'static> {
 #[derive(Resource)]
 #[allow(dead_code)]
 pub struct ConfigHandle<A: Asset> {
-    /// 强引用 handle。字段下划线前缀避免 "field is never read" 警告——
-    /// 它的存在本身就是作用（防止资产被回收）。
-    pub _handle: Handle<A>,
+    /// Strong handles retained for this asset type.
+    pub handles: Vec<Handle<A>>,
+}
+
+impl<A: Asset> Clone for ConfigHandle<A> {
+    fn clone(&self) -> Self {
+        Self {
+            handles: self.handles.clone(),
+        }
+    }
+}
+
+impl<A: Asset> ConfigHandle<A> {
+    /// Create a holder with one strong handle.
+    pub fn new(handle: Handle<A>) -> Self {
+        Self {
+            handles: vec![handle],
+        }
+    }
+
+    /// Retain a handle unless the same AssetId is already present.
+    pub fn push(&mut self, handle: Handle<A>) {
+        if !self
+            .handles
+            .iter()
+            .any(|existing| existing.id() == handle.id())
+        {
+            self.handles.push(handle);
+        }
+    }
 }

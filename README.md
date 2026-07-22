@@ -403,7 +403,7 @@ pub struct GameAssets {
 | `SimpleConfigDiff` | 简化 trait：只需 `PartialEq`，自动获得 `ConfigDiff`（单对象/枚举用） |
 | `DiffKind` | `Added / Removed / Modified / Mixed` |
 | `ConfigBind<A>` | Component：实体绑定到某个 handle |
-| `ConfigHandle<A>` | Resource：持有强引用 handle 防止资产被回收 |
+| `ConfigHandle<A>` | Resource：持有同类型所有已注册文件的强引用 handles，防止资产被回收 |
 | `HandleEntityCache<A>` | Resource：handle ↔ entity 双向缓存，自动维护 |
 | `LastSnapshot<A>` | Resource：每个 asset id 的上一版快照，自动初始化 |
 | `AssetRevision<A>` | Resource：每个 AssetId 的单调 revision 与 Available/Removed/LoadFailed 状态 |
@@ -423,8 +423,8 @@ pub struct GameAssets {
 
 | 方法 | 模式 | 说明 |
 |---|---|---|
-| `register_config::<T>(path)` | 包装 | 注册 ConfigLoader + 资源 + 系统 + 自动加载 + 持有 handle |
-| `register_asset::<A>(path)` | 直接 | 只注册资源 + 系统 + 自动加载 + 持有 handle（用户自己注册 loader） |
+| `register_config::<T>(path)` | 包装 | 注册 ConfigLoader + 资源 + 系统 + 自动加载 + 持有 handle；同类型可注册多个 path |
+| `register_asset::<A>(path)` | 直接 | 只注册资源 + 系统 + 自动加载 + 持有 handle；同类型可注册多个 path（用户自己注册 loader） |
 | `insert_config::<T>(id, raw, path)` | 包装 | 直接注入数据（测试/headless 用） |
 | `insert_asset::<A>(id, asset, path)` | 直接 | 直接注入数据 + 初始化快照（测试/headless 用，消除手动样板） |
 | `watch_asset::<A>()` | 通用 | 注册实体追踪 + 变更通知，无 `ConfigDiff` 要求（用户自己 load） |

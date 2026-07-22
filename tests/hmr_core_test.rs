@@ -17,9 +17,9 @@ use bevy::ecs::message::{MessageReader, Messages};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy_assets_hmr::{
-    ConfigAsset, ConfigBind, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh,
-    ConfigReloadFailed, ConfigRemoved, HandleEntityCache, HmrSource, LastSnapshot, RefreshCause,
-    RefreshDebouncer,
+    ConfigAsset, ConfigBind, ConfigDiff, ConfigHandle, ConfigHmrAppExt, ConfigHmrPlugin,
+    ConfigRefresh, ConfigReloadFailed, ConfigRemoved, HandleEntityCache, HmrSource, LastSnapshot,
+    RefreshCause, RefreshDebouncer,
 };
 // 注：`ConfigRefresh<TestDb>` 的泛型是 Config 类型（`ConfigAsset<TestDb>::Config = TestDb`），
 // 所以仍是 `ConfigRefresh<TestDb>`。`RefreshDebouncer` / `LastSnapshot` 的泛型是
@@ -344,6 +344,112 @@ fn same_config_type_multiple_assets_keep_distinct_asset_ids() {
         captured
             .iter()
             .any(|event| event.asset_id == second_id.untyped())
+    );
+}
+
+#[test]
+fn same_config_type_registrations_keep_deduplicated_paths_and_handles() {
+    let mut app = make_app(Duration::from_millis(0));
+    app.register_config::<TestDb>("data/first.ron")
+        .register_config::<TestDb>("data/second.ron")
+        .register_config::<TestDb>("data/first.ron");
+
+    // Startup should be installed only once, but it must load every unique
+    // path registered for this asset type.
+    app.update();
+
+    let registry = app
+        .world()
+        .resource::<bevy_assets_hmr::ConfigPathRegistry>();
+    assert_eq!(
+        registry.paths.get(ConfigAsset::<TestDb>::type_path()),
+        Some(&vec![
+            "data/test.ron".to_string(),
+            "data/first.ron".to_string(),
+            "data/second.ron".to_string(),
+        ])
+    );
+
+    let holder = app.world().resource::<ConfigHandle<ConfigAsset<TestDb>>>();
+    assert_eq!(holder.handles.len(), 3);
+    let ids: std::collections::HashSet<_> =
+        holder.handles.iter().map(|handle| handle.id()).collect();
+    assert_eq!(ids.len(), 3);
+}
+
+#[test]
+fn same_config_type_assets_remove_and_fail_independently() {
+    let mut app = make_app(Duration::from_millis(0));
+    app.insert_resource(CapturedRemoved::default());
+    app.insert_resource(CapturedReloadFailed::default());
+    app.add_systems(
+        Update,
+        (capture_removed_system, capture_reload_failed_system),
+    );
+    let removed_id = make_id(212);
+    let failed_id = make_id(213);
+
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        for (id, path, value) in [
+            (removed_id, "data/removed.ron", 1),
+            (failed_id, "data/failed.ron", 2),
+        ] {
+            let _ = assets.insert(
+                id,
+                ConfigAsset {
+                    raw: TestDb {
+                        items: vec![Item {
+                            id: "entry".into(),
+                            n: value,
+                        }],
+                    },
+                    source_path: path.into(),
+                },
+            );
+        }
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    app.world_mut()
+        .resource_mut::<Assets<ConfigAsset<TestDb>>>()
+        .remove(removed_id);
+    app.world_mut()
+        .resource_mut::<Messages<AssetLoadFailedEvent<ConfigAsset<TestDb>>>>()
+        .write(AssetLoadFailedEvent {
+            id: failed_id,
+            path: AssetPath::from("data/failed.ron"),
+            error: AssetLoadError::EmptyPath(AssetPath::from("")),
+        });
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let removed = app
+        .world()
+        .resource::<CapturedRemoved>()
+        .0
+        .as_ref()
+        .expect("the removed file should dispatch ConfigRemoved");
+    assert_eq!(removed.asset_id, removed_id.untyped());
+    assert_eq!(removed.source_path, "data/removed.ron");
+
+    let failures = &app.world().resource::<CapturedReloadFailed>().0;
+    let failed = failures
+        .iter()
+        .find(|event| event.asset_id == failed_id.untyped())
+        .expect("the failed file should dispatch ConfigReloadFailed");
+    assert_eq!(failed.source_path, "data/failed.ron");
+    assert_eq!(failed.current_config.as_ref().unwrap().items[0].n, 2);
+    assert!(
+        app.world()
+            .resource::<Assets<ConfigAsset<TestDb>>>()
+            .get(failed_id)
+            .is_some()
     );
 }
 
