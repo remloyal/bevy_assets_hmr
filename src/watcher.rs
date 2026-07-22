@@ -37,7 +37,7 @@ use bevy::ecs::{
     component::Component,
     entity::Entity,
     message::{Message, MessageReader, MessageWriter},
-    system::{Query, Res, ResMut},
+    system::{Query, ResMut},
     template::{FromTemplate, SpecializeFromTemplate, Template, TemplateContext},
 };
 use bevy::prelude::{Changed, Handle, RemovedComponents, Resource};
@@ -206,15 +206,19 @@ impl<A: Asset> AssetBindCache<A> {
     /// Insert / update an entity's binding.
     pub fn insert(&mut self, entity: Entity, id: AssetId<A>) {
         // Remove old binding if any.
-        if let Some(old_id) = self.entity_to_handle.get(&entity) {
-            if *old_id == id {
+        if let Some(old_id) = self.entity_to_handle.get(&entity).copied() {
+            if old_id == id {
                 return; // unchanged
             }
-            if let Some(set) = self.handle_to_entities.get_mut(old_id) {
+            let old_empty = if let Some(set) = self.handle_to_entities.get_mut(&old_id) {
                 set.remove(&entity);
-                if set.is_empty() {
-                    self.handle_to_entities.remove(old_id);
-                }
+                set.is_empty()
+            } else {
+                false
+            };
+            if old_empty {
+                self.handle_to_entities.remove(&old_id);
+                self.path_registry.remove(&old_id);
             }
         }
         self.entity_to_handle.insert(entity, id);
@@ -227,11 +231,15 @@ impl<A: Asset> AssetBindCache<A> {
     /// Remove an entity from the cache (on despawn / component removal).
     pub fn remove(&mut self, entity: Entity) {
         if let Some(id) = self.entity_to_handle.remove(&entity) {
-            if let Some(set) = self.handle_to_entities.get_mut(&id) {
+            let last_binding = if let Some(set) = self.handle_to_entities.get_mut(&id) {
                 set.remove(&entity);
-                if set.is_empty() {
-                    self.handle_to_entities.remove(&id);
-                }
+                set.is_empty()
+            } else {
+                false
+            };
+            if last_binding {
+                self.handle_to_entities.remove(&id);
+                self.path_registry.remove(&id);
             }
         }
     }
@@ -362,13 +370,47 @@ pub fn asset_bind_cleanup_system<A: Asset>(
 /// - [`AssetRemoved<A>`] on `Removed` (so subscribers can do cleanup).
 pub fn asset_watcher_system<A: Asset>(
     mut asset_events: MessageReader<AssetEvent<A>>,
-    cache: Res<AssetBindCache<A>>,
+    bindings: Query<&AssetBind<A>>,
+    mut cache: ResMut<AssetBindCache<A>>,
     mut changed_evts: MessageWriter<AssetChanged<A>>,
     mut removed_evts: MessageWriter<AssetRemoved<A>>,
 ) {
     for evt in asset_events.read() {
         match evt {
-            AssetEvent::Added { id } | AssetEvent::Modified { id } => {
+            AssetEvent::Added { id } => {
+                let id = *id;
+                // A previous Removed event clears the path registry. If the
+                // same handle becomes live again, recover its path from the
+                // still-present binding before dispatching AssetChanged.
+                if cache.get_path(&id).is_none() {
+                    let path = bindings
+                        .iter()
+                        .find(|bind| bind.handle.id() == id)
+                        .and_then(|bind| bind.handle.path())
+                        .map(ToString::to_string);
+                    if let Some(path) = path {
+                        cache.record_path(id, path);
+                    }
+                }
+                let target_entities: Vec<Entity> = cache
+                    .get_entities(&id)
+                    .map(|s| s.iter().copied().collect())
+                    .unwrap_or_default();
+                let target_count = target_entities.len();
+                let source_path = cache.get_path(&id).unwrap_or_default().to_string();
+                changed_evts.write(AssetChanged {
+                    asset_id: id,
+                    target_entities,
+                    source_path,
+                });
+                bevy::log::debug!(
+                    "[HMR] AssetChanged<{}> asset_id={:?}，关联实体数={}",
+                    std::any::type_name::<A>(),
+                    id,
+                    target_count,
+                );
+            }
+            AssetEvent::Modified { id } => {
                 let id = *id;
                 let target_entities: Vec<Entity> = cache
                     .get_entities(&id)
@@ -395,7 +437,9 @@ pub fn asset_watcher_system<A: Asset>(
                     .map(|s| s.iter().copied().collect())
                     .unwrap_or_default();
                 let target_count = target_entities.len();
-                let source_path = cache.get_path(&id).unwrap_or_default().to_string();
+                // Preserve the path in AssetRemoved, then release the cache
+                // entry. A later Added event can recover it from live binds.
+                let source_path = cache.path_registry.remove(&id).unwrap_or_default();
                 removed_evts.write(AssetRemoved {
                     asset_id: id,
                     target_entities,

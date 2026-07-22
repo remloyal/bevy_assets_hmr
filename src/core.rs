@@ -173,12 +173,7 @@ pub fn cache_validation_system<A: HmrSource>(
     for (entity, bind) in bindings.iter() {
         new_cache.insert(entity, bind.handle.id());
     }
-    if cache.entity_to_handle.len() != new_cache.entity_to_handle.len()
-        || !cache
-            .entity_to_handle
-            .keys()
-            .eq(new_cache.entity_to_handle.keys())
-    {
+    if cache.entity_to_handle != new_cache.entity_to_handle {
         *cache = new_cache;
     }
 }

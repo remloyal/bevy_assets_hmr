@@ -388,6 +388,52 @@ fn despawned_entity_is_removed_from_cache() {
     }
 }
 
+#[test]
+fn changed_handle_updates_both_cache_directions() {
+    let mut app = make_app(Duration::from_millis(0));
+    let old_id = make_id(43);
+    let new_id = make_id(44);
+    let entity = app
+        .world_mut()
+        .spawn(ConfigBind::<ConfigAsset<TestDb>>::with_id(old_id))
+        .id();
+    app.update();
+
+    app.world_mut()
+        .entity_mut(entity)
+        .insert(ConfigBind::<ConfigAsset<TestDb>>::with_id(new_id));
+    app.update();
+
+    let cache = app
+        .world()
+        .resource::<HandleEntityCache<ConfigAsset<TestDb>>>();
+    assert!(cache.get_entities(&old_id).is_none());
+    assert!(cache.get_entities(&new_id).unwrap().contains(&entity));
+    assert_eq!(cache.entity_to_handle[&entity], new_id);
+}
+
+#[test]
+fn removed_binding_component_is_removed_from_cache() {
+    let mut app = make_app(Duration::from_millis(0));
+    let asset_id = make_id(45);
+    let entity = app
+        .world_mut()
+        .spawn(ConfigBind::<ConfigAsset<TestDb>>::with_id(asset_id))
+        .id();
+    app.update();
+
+    app.world_mut()
+        .entity_mut(entity)
+        .remove::<ConfigBind<ConfigAsset<TestDb>>>();
+    app.update();
+
+    let cache = app
+        .world()
+        .resource::<HandleEntityCache<ConfigAsset<TestDb>>>();
+    assert!(!cache.entity_to_handle.contains_key(&entity));
+    assert!(cache.get_entities(&asset_id).is_none());
+}
+
 // ---- Problem 10 tests: AssetEvent::Removed dispatches ConfigRemoved ----
 
 #[derive(Resource, Default)]
@@ -537,9 +583,21 @@ struct DummyTexture {
 #[derive(Resource, Default)]
 struct CapturedAssetChanged(Option<bevy_assets_hmr::AssetChanged<DummyTexture>>);
 
+#[derive(Resource, Default)]
+struct CapturedAssetRemoved(Option<bevy_assets_hmr::AssetRemoved<DummyTexture>>);
+
 fn capture_asset_changed_system(
     mut reader: bevy::ecs::message::MessageReader<bevy_assets_hmr::AssetChanged<DummyTexture>>,
     mut captured: ResMut<CapturedAssetChanged>,
+) {
+    for evt in reader.read() {
+        captured.0 = Some(evt.clone());
+    }
+}
+
+fn capture_asset_removed_system(
+    mut reader: bevy::ecs::message::MessageReader<bevy_assets_hmr::AssetRemoved<DummyTexture>>,
+    mut captured: ResMut<CapturedAssetRemoved>,
 ) {
     for evt in reader.read() {
         captured.0 = Some(evt.clone());
@@ -555,7 +613,11 @@ fn make_watch_app() -> App {
     app.setup_hmr_headless();
     app.init_asset::<DummyTexture>();
     app.insert_resource(CapturedAssetChanged::default());
-    app.add_systems(Update, capture_asset_changed_system);
+    app.insert_resource(CapturedAssetRemoved::default());
+    app.add_systems(
+        Update,
+        (capture_asset_changed_system, capture_asset_removed_system),
+    );
     // watch_asset only registers infrastructure; user loads assets themselves.
     app.watch_asset::<DummyTexture>();
     app
@@ -730,6 +792,51 @@ fn watch_asset_despawned_entity_removed_from_cache() {
             "despawned entity must be removed from AssetBindCache"
         );
     }
+}
+
+#[test]
+fn watch_asset_removal_dispatches_then_clears_cached_path() {
+    use bevy_assets_hmr::AssetBindCache;
+
+    let mut app = make_watch_app();
+    let asset_id = AssetId::Uuid {
+        uuid: Uuid::from_u128(901),
+    };
+    app.world_mut()
+        .resource_mut::<AssetBindCache<DummyTexture>>()
+        .record_path(asset_id, "textures/removed.png".into());
+
+    {
+        let mut assets = app.world_mut().resource_mut::<Assets<DummyTexture>>();
+        let _ = assets.insert(
+            asset_id,
+            DummyTexture {
+                width: 8,
+                height: 8,
+            },
+        );
+    }
+    app.update();
+    app.world_mut()
+        .resource_mut::<Assets<DummyTexture>>()
+        .remove(asset_id);
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let removed = app
+        .world()
+        .resource::<CapturedAssetRemoved>()
+        .0
+        .as_ref()
+        .expect("AssetRemoved should be dispatched before path cleanup");
+    assert_eq!(removed.source_path, "textures/removed.png");
+    assert!(
+        app.world()
+            .resource::<AssetBindCache<DummyTexture>>()
+            .get_path(&asset_id)
+            .is_none()
+    );
 }
 
 // ===========================================================================
@@ -1144,45 +1251,30 @@ fn cache_validation_system_corrects_drift() {
         assert!(cache.get_entities(&asset_id).is_some());
     }
 
+    let wrong_id = make_id(901);
     {
         let mut cache = app
             .world_mut()
             .resource_mut::<HandleEntityCache<ConfigAsset<TestDb>>>();
         cache.remove(entity);
+        cache.insert(entity, wrong_id);
+        assert_eq!(cache.entity_to_handle.len(), 1);
+        assert_eq!(cache.entity_to_handle[&entity], wrong_id);
     }
 
-    {
-        let cache = app
-            .world()
-            .resource::<HandleEntityCache<ConfigAsset<TestDb>>>();
-        assert!(
-            cache.get_entities(&asset_id).is_none(),
-            "drift: entity should be missing from cache before validation"
-        );
-    }
+    // Run the validator directly so the test does not wait for its normal
+    // 30-second safety-net timer.
+    app.add_systems(
+        Update,
+        bevy_assets_hmr::cache_validation_system::<ConfigAsset<TestDb>>,
+    );
+    app.update();
 
-    let entity2 = app.world_mut().spawn_empty().id();
-    app.world_mut()
-        .entity_mut(entity2)
-        .insert(ConfigBind::<ConfigAsset<TestDb>>::with_id(asset_id));
-
-    for _ in 0..3 {
-        app.update();
-    }
-
-    {
-        let cache = app
-            .world()
-            .resource::<HandleEntityCache<ConfigAsset<TestDb>>>();
-        let bound: Vec<_> = cache
-            .get_entities(&asset_id)
-            .map(|s| s.iter().copied().collect())
-            .unwrap_or_default();
-        assert!(
-            bound.contains(&entity2),
-            "entity2 should be in cache after registry system runs"
-        );
-    }
+    let cache = app
+        .world()
+        .resource::<HandleEntityCache<ConfigAsset<TestDb>>>();
+    assert_eq!(cache.entity_to_handle[&entity], asset_id);
+    assert!(cache.get_entities(&wrong_id).is_none());
 }
 
 // ===========================================================================

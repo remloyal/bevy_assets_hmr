@@ -116,6 +116,68 @@ fn remove_last_entity_for_handle_drops_the_set() {
 }
 
 #[test]
+fn removing_last_binding_clears_source_path() {
+    let mut cache: bevy_assets_hmr::AssetBindCache<ConfigAsset<DummyDb>> = Default::default();
+    let id = make_id(11);
+    let entity = Entity::from_bits(11);
+
+    cache.record_path(id, "data/dummy.ron".into());
+    cache.insert(entity, id);
+    cache.remove(entity);
+
+    assert!(cache.get_path(&id).is_none());
+}
+
+#[test]
+fn source_path_survives_until_last_binding_is_removed() {
+    let mut cache: bevy_assets_hmr::AssetBindCache<ConfigAsset<DummyDb>> = Default::default();
+    let id = make_id(12);
+    let e1 = Entity::from_bits(12);
+    let e2 = Entity::from_bits(13);
+
+    cache.record_path(id, "data/shared.ron".into());
+    cache.insert(e1, id);
+    cache.insert(e2, id);
+    cache.remove(e1);
+    assert_eq!(cache.get_path(&id), Some("data/shared.ron"));
+    cache.remove(e2);
+    assert!(cache.get_path(&id).is_none());
+}
+
+#[test]
+fn changing_handle_clears_old_source_path() {
+    let mut cache: bevy_assets_hmr::AssetBindCache<ConfigAsset<DummyDb>> = Default::default();
+    let old_id = make_id(14);
+    let new_id = make_id(15);
+    let entity = Entity::from_bits(14);
+
+    cache.insert(entity, old_id);
+    cache.record_path(old_id, "data/old.ron".into());
+    cache.insert(entity, new_id);
+
+    assert!(cache.get_entities(&old_id).is_none());
+    assert!(cache.get_path(&old_id).is_none());
+    assert_eq!(cache.entity_to_handle[&entity], new_id);
+}
+
+#[test]
+fn repeated_asset_id_reuse_does_not_grow_cache() {
+    let mut cache: bevy_assets_hmr::AssetBindCache<ConfigAsset<DummyDb>> = Default::default();
+    let id = make_id(16);
+
+    for generation in 0..1_000_u64 {
+        let entity = Entity::from_bits(generation + 100);
+        cache.insert(entity, id);
+        cache.record_path(id, format!("data/generation-{generation}.ron"));
+        cache.remove(entity);
+
+        assert!(cache.entity_to_handle.is_empty());
+        assert!(cache.handle_to_entities.is_empty());
+        assert!(cache.path_registry.is_empty());
+    }
+}
+
+#[test]
 fn reinserting_entity_with_new_handle_removes_old_binding() {
     let mut cache: HandleEntityCache<ConfigAsset<DummyDb>> = HandleEntityCache::default();
     let id1 = make_id(1);
