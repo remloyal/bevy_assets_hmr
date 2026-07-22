@@ -103,12 +103,12 @@ impl<A: HmrSource> HandleEntityCache<A> {
     /// bound to a different handle, that prior binding is removed first.
     pub fn insert(&mut self, entity: Entity, handle: AssetId<A>) {
         // Remove old binding if present.
-        if let Some(old) = self.entity_to_handle.insert(entity, handle) {
-            if let Some(set) = self.handle_to_entities.get_mut(&old) {
-                set.remove(&entity);
-                if set.is_empty() {
-                    self.handle_to_entities.remove(&old);
-                }
+        if let Some(old) = self.entity_to_handle.insert(entity, handle)
+            && let Some(set) = self.handle_to_entities.get_mut(&old)
+        {
+            set.remove(&entity);
+            if set.is_empty() {
+                self.handle_to_entities.remove(&old);
             }
         }
         self.handle_to_entities
@@ -124,12 +124,12 @@ impl<A: HmrSource> HandleEntityCache<A> {
 
     /// Remove an entity from the cache (e.g. when it's despawned).
     pub fn remove(&mut self, entity: Entity) {
-        if let Some(old) = self.entity_to_handle.remove(&entity) {
-            if let Some(set) = self.handle_to_entities.get_mut(&old) {
-                set.remove(&entity);
-                if set.is_empty() {
-                    self.handle_to_entities.remove(&old);
-                }
+        if let Some(old) = self.entity_to_handle.remove(&entity)
+            && let Some(set) = self.handle_to_entities.get_mut(&old)
+        {
+            set.remove(&entity);
+            if set.is_empty() {
+                self.handle_to_entities.remove(&old);
             }
         }
     }

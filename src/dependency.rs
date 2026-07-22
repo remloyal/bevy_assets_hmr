@@ -201,6 +201,7 @@ pub fn cascade_dispatch_system<A: HmrSource>(
     mut queue: ResMut<CascadeQueue>,
     assets: Res<Assets<A>>,
     cache: Res<crate::binding::HandleEntityCache<A>>,
+    mut revisions: ResMut<crate::view::AssetRevision<A>>,
     mut refresh_evts: MessageWriter<crate::refresh::ConfigRefresh<A::Config>>,
 ) {
     if queue.pending.is_empty() {
@@ -239,6 +240,7 @@ pub fn cascade_dispatch_system<A: HmrSource>(
             .get_entities(&parent_id)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
+        revisions.record_available(parent_id);
 
         refresh_evts.write(crate::refresh::ConfigRefresh {
             asset_id: parent_untyped,

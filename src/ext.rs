@@ -404,9 +404,11 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
         .init_resource::<HandleEntityCache<ConfigAsset<T>>>()
         .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
         .init_resource::<LastSnapshot<ConfigAsset<T>>>()
+        .init_resource::<crate::view::AssetRevision<ConfigAsset<T>>>()
         .add_message::<ConfigRefresh<T>>()
         .add_message::<ConfigRemoved<T>>()
-        .add_message::<ConfigReloadFailed<T>>();
+        .add_message::<ConfigReloadFailed<T>>()
+        .add_message::<crate::view::ConfigViewSync<ConfigAsset<T>>>();
 
     init_shared_dependency_resources(app);
 
@@ -423,6 +425,8 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
                 crate::dependency::dependency_registry_system::<ConfigAsset<T>>,
                 crate::dependency::dependency_cleanup_system::<ConfigAsset<T>>,
                 crate::dependency::cascade_dispatch_system::<ConfigAsset<T>>,
+                crate::view::route_active_config_views::<ConfigAsset<T>>,
+                crate::view::sync_activated_config_views::<ConfigAsset<T>>,
             )
                 .chain(),
         )
@@ -461,9 +465,11 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
     app.init_resource::<HandleEntityCache<A>>()
         .init_resource::<RefreshDebouncer<A>>()
         .init_resource::<LastSnapshot<A>>()
+        .init_resource::<crate::view::AssetRevision<A>>()
         .add_message::<ConfigRefresh<A::Config>>()
         .add_message::<ConfigRemoved<A::Config>>()
-        .add_message::<ConfigReloadFailed<A::Config>>();
+        .add_message::<ConfigReloadFailed<A::Config>>()
+        .add_message::<crate::view::ConfigViewSync<A>>();
 
     init_shared_dependency_resources(app);
 
@@ -480,6 +486,8 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
                 crate::dependency::dependency_registry_system::<A>,
                 crate::dependency::dependency_cleanup_system::<A>,
                 crate::dependency::cascade_dispatch_system::<A>,
+                crate::view::route_active_config_views::<A>,
+                crate::view::sync_activated_config_views::<A>,
             )
                 .chain(),
         )

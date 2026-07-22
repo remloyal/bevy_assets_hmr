@@ -25,7 +25,7 @@ fn main() {
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::asset::AssetPlugin::default());
     app.add_plugins(bevy::image::ImagePlugin::default());
-    app.add_plugins(bevy::ui::UiPlugin::default());
+    app.add_plugins(bevy::ui::UiPlugin);
     app.add_plugins(ConfigHmrPlugin::default());
     app.watch_asset::<Image>();
 
@@ -63,5 +63,5 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     });
 
     // Camera
-    commands.spawn(Camera2d::default());
+    commands.spawn(Camera2d);
 }

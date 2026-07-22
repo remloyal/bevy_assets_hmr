@@ -21,7 +21,7 @@
 //! - **包装模式**：`ConfigAsset<T>` impl `HmrSource`（框架自动做），
 //!   `type Config = T`。用户用 `register_config::<T>()` 注册。
 //! - **直接模式**：用户自己的 `Asset` 直接 impl `HmrSource`，
-//!  用自己的 loader 加载，用自己的 `A::type_path()` 注册路径。
+//!   用自己的 loader 加载，用自己的 `A::type_path()` 注册路径。
 
 use crate::asset::ConfigAsset;
 use crate::binding::HandleEntityCache;
@@ -128,6 +128,7 @@ pub fn asset_load_failed_system<A: HmrSource>(
     mut failures: MessageReader<AssetLoadFailedEvent<A>>,
     snapshots: Res<LastSnapshot<A>>,
     cache: Res<HandleEntityCache<A>>,
+    mut revisions: ResMut<crate::view::AssetRevision<A>>,
     mut failed_messages: MessageWriter<crate::refresh::ConfigReloadFailed<A::Config>>,
 ) {
     for failure in failures.read() {
@@ -141,11 +142,14 @@ pub fn asset_load_failed_system<A: HmrSource>(
             .get_entities(&failure.id)
             .map(|entities| entities.iter().copied().collect())
             .unwrap_or_default();
+        let error = failure.error.to_string();
+
+        revisions.record_failed(failure.id, source_path.clone(), error.clone());
 
         failed_messages.write(crate::refresh::ConfigReloadFailed {
             asset_id: failure.id.untyped(),
             source_path,
-            error: failure.error.to_string(),
+            error,
             target_entities,
             current_config,
         });

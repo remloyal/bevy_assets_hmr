@@ -12,7 +12,7 @@ use std::sync::Arc;
 ///
 /// `T` must implement `Asset + DeserializeOwned + Send + Sync + 'static`.
 /// The consuming crate registers one `ConfigLoader::<T>` per config type
-/// via [`crate::ConfigHmrPlugin::register_hmr_type`].
+/// via [`crate::ConfigHmrAppExt::register_config`].
 #[derive(TypePath)]
 pub struct ConfigLoader<T> {
     _marker: PhantomData<T>,

@@ -129,7 +129,7 @@ pub struct ConfigRefresh<T: ConfigDiff + Clone + Send + Sync + 'static> {
 ///
 /// 与 `ConfigRefresh` 的区别：
 /// - 资产已被卸载，无法提供 `new_config` 或 `changed_ids`；
-/// - `target_entities` 从 [`HandleEntityCache<A>`] 在派发瞬间快照取得
+/// - `target_entities` 从 [`crate::HandleEntityCache<A>`] 在派发瞬间快照取得
 ///   （派发后这些绑定仍存在，由订阅方决定是否 despawn 对应实体）；
 /// - `source_path` 来自资产被移除前记录的值（若资产从未加载则为空）。
 #[derive(Message, Clone)]

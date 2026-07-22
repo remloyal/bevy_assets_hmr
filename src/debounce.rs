@@ -89,6 +89,7 @@ pub(crate) fn enqueue_removed<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>,
 /// Also flushes `pending_removed`: for each removed id whose window has
 /// elapsed, dispatches a [`crate::ConfigRemoved`] event (if a prior snapshot
 /// existed) and cleans up the snapshot.
+#[allow(clippy::too_many_arguments)]
 pub fn flush_debounced_refresh<A: HmrSource>(
     mut debouncer: ResMut<RefreshDebouncer<A>>,
     assets: Res<Assets<A>>,
@@ -96,6 +97,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
     mut snapshots: ResMut<LastSnapshot<A>>,
     mut refresh_evts: MessageWriter<ConfigRefresh<A::Config>>,
     mut removed_evts: MessageWriter<ConfigRemoved<A::Config>>,
+    mut revisions: ResMut<crate::view::AssetRevision<A>>,
     graph: Res<crate::dependency::DependencyGraph>,
     mut cascade_queue: ResMut<crate::dependency::CascadeQueue>,
 ) {
@@ -133,6 +135,8 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             if !had_snapshot {
                 continue;
             }
+
+            revisions.record_removed(id);
 
             let target_entities: Vec<_> = cache
                 .get_entities(&id)
@@ -186,6 +190,11 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             };
 
             let new_raw = new_asset.config();
+            let was_failed = matches!(
+                revisions.status(id),
+                Some(crate::view::AssetRevisionStatus::LoadFailed { .. })
+            );
+            let had_revision = revisions.revision(id).is_some();
 
             let (delta, diff_kind) = match snapshots.map.get(&id) {
                 Some(old_raw) => {
@@ -207,6 +216,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                     snapshots
                         .source_paths
                         .insert(id, new_asset.source_path().to_string());
+                    revisions.record_available(id);
                     continue;
                 }
             };
@@ -217,12 +227,18 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 .source_paths
                 .insert(id, new_asset.source_path().to_string());
 
-            // Skip dispatch if nothing actually changed (e.g. same content re-inserted).
-            if delta.is_empty() {
+            // Same-content inserts are normally ignored. After a load
+            // failure, however, an empty diff still represents recovery.
+            if delta.is_empty() && !was_failed {
+                if !had_revision {
+                    revisions.record_available(id);
+                }
                 continue;
             }
 
             let changed_ids = delta.changed_ids();
+            let empty_delta = delta.is_empty();
+            revisions.record_available(id);
 
             // Collect target_entities from the cache (may be empty for the
             // data-table-via-Resource pattern).
@@ -240,8 +256,16 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 target_entities,
                 changed_ids,
                 delta,
-                diff_kind,
-                cause: RefreshCause::Direct,
+                diff_kind: if empty_delta {
+                    DiffKind::Modified
+                } else {
+                    diff_kind
+                },
+                cause: if was_failed {
+                    RefreshCause::Recovery
+                } else {
+                    RefreshCause::Direct
+                },
                 source_path: new_asset.source_path().to_string(),
             });
 

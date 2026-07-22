@@ -35,6 +35,7 @@ pub mod ext;
 mod loader;
 mod refresh;
 mod registry;
+mod view;
 mod watcher;
 
 pub use asset::{ConfigAsset, ConfigHandle};
@@ -50,7 +51,7 @@ pub use dependency::{
     CascadeQueue, CascadeRequest, DependencyGraph, cascade_dispatch_system,
     dependency_cleanup_system, dependency_registry_system,
 };
-pub use diff::{ConfigDiff, SimpleConfigDiff, diff_entries_by_id};
+pub use diff::{ConfigDiff, ConfigDiffResult, SimpleConfigDiff, diff_entries_by_id};
 pub use ext::ConfigHmrAppExt;
 pub use ext::{HmrAutoWatch, HmrAutoWatchPlugin, adopt_handle, take_over_handle};
 pub use loader::ConfigLoader;
@@ -58,6 +59,10 @@ pub use refresh::{
     ConfigDelta, ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind, RefreshCause,
 };
 pub use registry::ConfigPathRegistry;
+pub use view::{
+    ActiveConfigView, AppliedRevision, AssetRevision, AssetRevisionEntry, AssetRevisionStatus,
+    ConfigViewSync, route_active_config_views, sync_activated_config_views,
+};
 pub use watcher::{
     AssetBind, AssetBindCache, AssetBindTemplate, AssetChanged, AssetRemoved,
     asset_bind_cleanup_system, asset_bind_registry_system, asset_watcher_system,

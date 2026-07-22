@@ -6,10 +6,13 @@
 //! broadcasts a [`crate::ConfigRefresh`] event carrying the `changed_ids`.
 //!
 //! For the common `Vec<Entry>` + `Entry.id: String` pattern, use the
-//! [`impl_config_diff!`] macro to generate the implementation in one line.
+//! `impl_config_diff!` macro to generate the implementation in one line.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+
+/// Added, removed, and modified id sets returned by [`ConfigDiff::diff`].
+pub type ConfigDiffResult<Id> = (HashSet<Id>, HashSet<Id>, HashSet<Id>);
 
 /// Trait implemented by config types to support diff-based refresh.
 ///
@@ -22,7 +25,7 @@ use std::hash::Hash;
 /// `ConfigDiff` on plain data structs (no `#[derive(Asset)]`) and reuse the
 /// diff logic outside of Bevy's asset system if needed.
 ///
-/// For the common `Vec<Entry>` pattern, use the [`impl_config_diff!`] macro
+/// For the common `Vec<Entry>` pattern, use the `impl_config_diff!` macro
 /// instead of implementing this manually.
 ///
 /// # 如何选择实现方式
@@ -30,10 +33,10 @@ use std::hash::Hash;
 /// | 场景 | 实现方式 | 需要写 `type Id`？ |
 /// |------|---------|-------------------|
 /// | 单对象 / 枚举（整体比较） | [`SimpleConfigDiff`] | **否** |
-/// | `Vec<Entry>` + `id: String` | [`impl_config_diff!`] 宏 | 否（宏生成） |
+/// | `Vec<Entry>` + `id: String` | `impl_config_diff!` 宏 | 否（宏生成） |
 /// | `Vec<Entry>` + `id: String` | `#[derive(ConfigDiff)]` | 否（derive 生成） |
 /// | `Vec<Entry>` + 非 String id（`u32`/`Uuid`） | `#[derive(ConfigDiff)]` + `id_type` | 否（derive 生成） |
-/// | `Vec<Entry>` + 非 String id（`u32`/`Uuid`） | [`impl_config_diff!`] 宏 + 类型参数 | 否（宏生成） |
+/// | `Vec<Entry>` + 非 String id（`u32`/`Uuid`） | `impl_config_diff!` 宏 + 类型参数 | 否（宏生成） |
 /// | 特殊 id 逻辑 | 手写 `impl ConfigDiff` | **是** |
 ///
 /// 只有需要**完全自定义 diff 逻辑**时才需要手写 `type Id`。
@@ -43,7 +46,7 @@ pub trait ConfigDiff: Send + Sync + 'static {
     /// Set this to `String` for the common `id: String` database pattern,
     /// or to `u32`, `Uuid`, or any `Eq + Hash + Clone + Send + Sync + 'static`
     /// key to use a non-`String` primary key. The derive macro,
-    /// [`impl_config_diff!`] macro, and [`SimpleConfigDiff`] blanket impl all
+    /// `impl_config_diff!` macro, and [`SimpleConfigDiff`] blanket impl all
     /// default this to `String` for you - you only need to set it manually
     /// when using a non-`String` id type.
     type Id: Eq + Hash + Clone + Send + Sync + std::fmt::Debug + 'static;
@@ -53,7 +56,7 @@ pub trait ConfigDiff: Send + Sync + 'static {
     /// - `added`: ids present in `new` but not in `old`
     /// - `removed`: ids present in `old` but not in `new`
     /// - `modified`: ids present in both whose entries differ
-    fn diff(old: &Self, new: &Self) -> (HashSet<Self::Id>, HashSet<Self::Id>, HashSet<Self::Id>);
+    fn diff(old: &Self, new: &Self) -> ConfigDiffResult<Self::Id>;
 }
 
 /// Diff two entry slices using an indexed lookup by logical id.
@@ -142,7 +145,7 @@ where
 /// ```
 ///
 /// For `Vec<Entry>` databases with id-level diffing, use
-/// [`impl_config_diff!`](crate::impl_config_diff!) or
+/// `impl_config_diff!` or
 /// `#[derive(ConfigDiff)]` instead.
 pub trait SimpleConfigDiff: PartialEq + Send + Sync + 'static {
     /// The id string reported as "modified" when the value changes.
@@ -169,7 +172,7 @@ impl<T: SimpleConfigDiff> ConfigDiff for T {
     }
 }
 
-/// Implements [`ConfigDiff`] for a "Vec<Entry> wrapper" database type by
+/// Implements [`ConfigDiff`] for a "`Vec<Entry>` wrapper" database type by
 /// diffing on the `id` field of each entry.
 ///
 /// Eliminates ~20 lines of boilerplate per database type. The entry type

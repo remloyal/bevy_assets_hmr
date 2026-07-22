@@ -745,7 +745,7 @@ fn watch_asset_dispatches_asset_changed_on_modified() {
         let evt = captured.0.as_ref().unwrap();
         assert_eq!(evt.asset_id, asset_id);
         let assets = app.world().resource::<Assets<DummyTexture>>();
-        assert_eq!(evt.asset(&assets).unwrap().width, 64);
+        assert_eq!(evt.asset(assets).unwrap().width, 64);
     }
 
     // Clear the capture.
@@ -775,7 +775,7 @@ fn watch_asset_dispatches_asset_changed_on_modified() {
     assert_eq!(evt.asset_id, asset_id);
     let assets = app.world().resource::<Assets<DummyTexture>>();
     assert_eq!(
-        evt.asset(&assets).unwrap().width,
+        evt.asset(assets).unwrap().width,
         128,
         "AssetChanged should resolve the current asset without cloning it"
     );
