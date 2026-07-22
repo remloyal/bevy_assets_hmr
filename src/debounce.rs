@@ -44,16 +44,6 @@ pub struct RefreshDebouncer<A: HmrSource> {
     /// Debounce window. Set by `App::register_config` from
     /// `ConfigHmrPlugin::debounce_window`.
     pub window: Duration,
-    /// 每个 id 上次被 flush 的时间（用于死循环保护 cooldown）。
-    ///
-    /// flush 成功后记录 `Instant::now()`；cooldown 时间内同一 id 的新事件
-    /// 会被 `enqueue` 直接跳过，防止「重载回调写文件 → file_watcher 触发
-    /// → 再次 enqueue → flush → 写文件 → …」无限循环。
-    pub flushed_at: HashMap<AssetId<A>, Instant>,
-    /// Cooldown 窗口：flush 后在此时间内不再处理同一 id 的新事件。
-    /// 默认 500ms，区分于 debounce 窗口（debounce 是合并短时间多次写入，
-    /// cooldown 是防止写回触发的递归重入）。
-    pub cooldown: Duration,
 }
 
 impl<A: HmrSource> Default for RefreshDebouncer<A> {
@@ -62,34 +52,23 @@ impl<A: HmrSource> Default for RefreshDebouncer<A> {
             pending: HashMap::new(),
             pending_removed: HashMap::new(),
             window: Duration::from_millis(150),
-            flushed_at: HashMap::new(),
-            cooldown: Duration::from_millis(500),
         }
     }
 }
 
 /// Enqueue a modified asset for debounced refresh. Called by `hmr_core_system`.
-///
-/// 如果该 id 刚被 flush 且在 cooldown 窗口内，直接跳过——防止「重载回调写文件
-/// → file_watcher 触发 → 再次 enqueue」的无限循环。
 pub(crate) fn enqueue<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>, id: AssetId<A>) {
-    // Cooldown 检查：防止写回死循环
-    if let Some(last_flush) = debouncer.flushed_at.get(&id) {
-        if last_flush.elapsed() < debouncer.cooldown {
-            bevy::log::debug!(
-                "[HMR] {} skipped: within cooldown window ({}ms since last flush)",
-                A::type_path(),
-                last_flush.elapsed().as_millis(),
-            );
-            return;
-        }
-    }
+    // Last event wins within the debounce window. This handles editor atomic
+    // saves, which commonly appear as Removed followed by Added.
+    debouncer.pending_removed.remove(&id);
     debouncer.pending.insert(id, Instant::now());
 }
 
 /// Enqueue a removed asset for debounced `ConfigRemoved` dispatch.
 /// Called by `hmr_core_system` on `AssetEvent::Removed`.
 pub(crate) fn enqueue_removed<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>, id: AssetId<A>) {
+    // A later removal supersedes an earlier Added/Modified for the same id.
+    debouncer.pending.remove(&id);
     debouncer.pending_removed.insert(id, Instant::now());
 }
 
@@ -256,9 +235,6 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             for (parent_untyped, parent_type) in parents {
                 cascade_queue.pending.push((parent_untyped, parent_type));
             }
-
-            // 记录 flush 时间（cooldown 保护，防止写回死循环）
-            debouncer.flushed_at.insert(id, Instant::now());
 
             // info 日志：路径 + changed_ids 数 + 关联实体数
             bevy::log::info!(

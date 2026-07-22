@@ -892,11 +892,11 @@ fn invalid_ron_asset_emits_config_reload_failed_end_to_end() {
 }
 
 // ===========================================================================
-// Cooldown tests: verify the write-back loop protection
+// Debounce tests: final state must win without dropping later saves
 // ===========================================================================
 
 #[test]
-fn cooldown_skips_events_within_window() {
+fn subsequent_save_within_500ms_reaches_final_state() {
     let mut app = make_app(Duration::from_millis(0));
 
     let asset_id = make_id(700);
@@ -942,21 +942,17 @@ fn cooldown_skips_events_within_window() {
         app.update();
     }
 
-    let captured = app.world().resource::<CapturedRefresh>();
-    assert!(
-        captured.0.is_some(),
-        "first modification should dispatch a refresh"
+    assert_eq!(
+        app.world()
+            .resource::<CapturedRefresh>()
+            .0
+            .as_ref()
+            .expect("first modification should dispatch")
+            .new_config
+            .items[0]
+            .n,
+        2
     );
-
-    {
-        let debouncer = app
-            .world()
-            .resource::<RefreshDebouncer<ConfigAsset<TestDb>>>();
-        assert!(
-            debouncer.flushed_at.contains_key(&asset_id),
-            "flushed_at should be recorded after a successful flush"
-        );
-    }
 
     {
         let mut assets = app
@@ -982,17 +978,94 @@ fn cooldown_skips_events_within_window() {
     }
 
     let captured = app.world().resource::<CapturedRefresh>();
-    assert!(
-        captured.0.is_none(),
-        "cooldown should skip events within the window"
+    assert_eq!(
+        captured
+            .0
+            .as_ref()
+            .expect("a second save within 500ms must not be dropped")
+            .new_config
+            .items[0]
+            .n,
+        3
     );
+    let snapshots = app.world().resource::<LastSnapshot<ConfigAsset<TestDb>>>();
+    assert_eq!(snapshots.map[&asset_id].items[0].n, 3);
 }
 
 #[test]
-fn cooldown_allows_events_after_window_elapses() {
-    let mut app = make_app(Duration::from_millis(0));
+fn removed_then_added_in_same_window_refreshes_final_asset() {
+    let mut app = make_app_with_removed_capture(Duration::from_millis(0));
 
     let asset_id = make_id(800);
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "a".into(),
+                        n: 1,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    app.world_mut().resource_mut::<CapturedRefresh>().0 = None;
+
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        assets.remove(asset_id);
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "a".into(),
+                        n: 3,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+    for _ in 0..5 {
+        app.update();
+    }
+
+    let captured = app.world().resource::<CapturedRefresh>();
+    assert_eq!(
+        captured
+            .0
+            .as_ref()
+            .expect("Removed followed by Added should refresh the final asset")
+            .new_config
+            .items[0]
+            .n,
+        3
+    );
+    assert!(
+        app.world().resource::<CapturedRemoved>().0.is_none(),
+        "the superseded Removed event must not be dispatched"
+    );
+    let snapshots = app.world().resource::<LastSnapshot<ConfigAsset<TestDb>>>();
+    assert_eq!(snapshots.map[&asset_id].items[0].n, 3);
+}
+
+#[test]
+fn modified_then_removed_in_same_window_dispatches_only_removed() {
+    let mut app = make_app_with_removed_capture(Duration::from_millis(0));
+    let asset_id = make_id(801);
+
     {
         let mut assets = app
             .world_mut()
@@ -1030,47 +1103,24 @@ fn cooldown_allows_events_after_window_elapses() {
                 source_path: "data/test.ron".into(),
             },
         );
-    }
-    for _ in 0..3 {
-        app.update();
+        assets.remove(asset_id);
     }
     app.world_mut().resource_mut::<CapturedRefresh>().0 = None;
 
-    {
-        let mut debouncer = app
-            .world_mut()
-            .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
-        let long_ago =
-            std::time::Instant::now() - debouncer.cooldown - std::time::Duration::from_secs(1);
-        debouncer.flushed_at.insert(asset_id, long_ago);
-    }
-
-    {
-        let mut assets = app
-            .world_mut()
-            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
-        let _ = assets.insert(
-            asset_id,
-            ConfigAsset {
-                raw: TestDb {
-                    items: vec![Item {
-                        id: "a".into(),
-                        n: 3,
-                    }],
-                },
-                source_path: "data/test.ron".into(),
-            },
-        );
-    }
-    for _ in 0..5 {
+    for _ in 0..3 {
         app.update();
     }
 
-    let captured = app.world().resource::<CapturedRefresh>();
     assert!(
-        captured.0.is_some(),
-        "cooldown should allow events after the window elapses"
+        app.world().resource::<CapturedRefresh>().0.is_none(),
+        "the superseded Modified event must not be dispatched"
     );
+    assert!(
+        app.world().resource::<CapturedRemoved>().0.is_some(),
+        "a final Removed event must be dispatched"
+    );
+    let snapshots = app.world().resource::<LastSnapshot<ConfigAsset<TestDb>>>();
+    assert!(!snapshots.map.contains_key(&asset_id));
 }
 
 #[test]
