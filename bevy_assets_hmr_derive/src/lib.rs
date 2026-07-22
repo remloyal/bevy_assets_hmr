@@ -129,24 +129,11 @@ pub fn derive_config_diff(input: TokenStream) -> TokenStream {
                         std::collections::HashSet<#id_type>,
                         std::collections::HashSet<#id_type>,
                     ) {
-                        use std::collections::HashSet;
-                        let old_ids: HashSet<#id_type> =
-                            old.#field_ident.iter().map(|e| e.#id_ident.clone()).collect();
-                        let new_ids: HashSet<#id_type> =
-                            new.#field_ident.iter().map(|e| e.#id_ident.clone()).collect();
-                        let added: HashSet<#id_type> =
-                            new_ids.difference(&old_ids).cloned().collect();
-                        let removed: HashSet<#id_type> =
-                            old_ids.difference(&new_ids).cloned().collect();
-                        let modified: HashSet<#id_type> = old_ids
-                            .intersection(&new_ids)
-                            .filter(|id| {
-                                old.#field_ident.iter().find(|e| &e.#id_ident == *id)
-                                    != new.#field_ident.iter().find(|e| &e.#id_ident == *id)
-                            })
-                            .cloned()
-                            .collect();
-                        (added, removed, modified)
+                        #crate_path::diff_entries_by_id(
+                            &old.#field_ident,
+                            &new.#field_ident,
+                            |entry| entry.#id_ident.clone(),
+                        )
                     }
                 }
             }

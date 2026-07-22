@@ -50,7 +50,7 @@ pub use dependency::{
     CascadeQueue, DependencyGraph, cascade_dispatch_system, dependency_cleanup_system,
     dependency_registry_system,
 };
-pub use diff::{ConfigDiff, SimpleConfigDiff};
+pub use diff::{ConfigDiff, SimpleConfigDiff, diff_entries_by_id};
 pub use ext::ConfigHmrAppExt;
 pub use ext::{HmrAutoWatch, HmrAutoWatchPlugin, adopt_handle, take_over_handle};
 pub use loader::ConfigLoader;

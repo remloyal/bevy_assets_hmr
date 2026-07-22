@@ -8,7 +8,7 @@
 //! For the common `Vec<Entry>` + `Entry.id: String` pattern, use the
 //! [`impl_config_diff!`] macro to generate the implementation in one line.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 /// Trait implemented by config types to support diff-based refresh.
@@ -54,6 +54,63 @@ pub trait ConfigDiff: Send + Sync + 'static {
     /// - `removed`: ids present in `old` but not in `new`
     /// - `modified`: ids present in both whose entries differ
     fn diff(old: &Self, new: &Self) -> (HashSet<Self::Id>, HashSet<Self::Id>, HashSet<Self::Id>);
+}
+
+/// Diff two entry slices using an indexed lookup by logical id.
+///
+/// The returned sets are `(added, removed, modified)`. Each slice is indexed
+/// once, so the normal path is average O(n), including modified-entry checks.
+/// IDs must be unique within each slice. When a duplicate is encountered the
+/// duplicate id is logged and classified as modified, making the invalid
+/// input observable without silently choosing an arbitrary entry as unchanged.
+pub fn diff_entries_by_id<Entry, Id, F>(
+    old: &[Entry],
+    new: &[Entry],
+    mut id_of: F,
+) -> (HashSet<Id>, HashSet<Id>, HashSet<Id>)
+where
+    Entry: PartialEq,
+    Id: Eq + Hash + Clone + Send + Sync + std::fmt::Debug + 'static,
+    F: FnMut(&Entry) -> Id,
+{
+    let mut old_index: HashMap<Id, &Entry> = HashMap::with_capacity(old.len());
+    let mut new_index: HashMap<Id, &Entry> = HashMap::with_capacity(new.len());
+    let mut duplicate_ids = HashSet::new();
+
+    for entry in old {
+        let id = id_of(entry);
+        if old_index.insert(id.clone(), entry).is_some() {
+            duplicate_ids.insert(id);
+        }
+    }
+    for entry in new {
+        let id = id_of(entry);
+        if new_index.insert(id.clone(), entry).is_some() {
+            duplicate_ids.insert(id);
+        }
+    }
+
+    let old_ids: HashSet<Id> = old_index.keys().cloned().collect();
+    let new_ids: HashSet<Id> = new_index.keys().cloned().collect();
+    let added = new_ids.difference(&old_ids).cloned().collect();
+    let removed = old_ids.difference(&new_ids).cloned().collect();
+    let mut modified: HashSet<Id> = old_index
+        .keys()
+        .filter_map(|id| match new_index.get(id) {
+            Some(new_entry) if old_index[id] != *new_entry => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    if !duplicate_ids.is_empty() {
+        bevy::log::error!(
+            "[HMR] duplicate config entry ids detected; treating them as modified: {:?}",
+            duplicate_ids
+        );
+        modified.extend(duplicate_ids);
+    }
+
+    (added, removed, modified)
 }
 
 /// Simplified diff trait for **single-object** configs (one file = one value).
@@ -187,24 +244,9 @@ macro_rules! impl_config_diff {
                 std::collections::HashSet<$id_type>,
                 std::collections::HashSet<$id_type>,
             ) {
-                use std::collections::HashSet;
-                let old_ids: HashSet<$id_type> =
-                    old.$field.iter().map(|e| e.$id_field.clone()).collect();
-                let new_ids: HashSet<$id_type> =
-                    new.$field.iter().map(|e| e.$id_field.clone()).collect();
-                let added: HashSet<$id_type> =
-                    new_ids.difference(&old_ids).cloned().collect();
-                let removed: HashSet<$id_type> =
-                    old_ids.difference(&new_ids).cloned().collect();
-                let modified: HashSet<$id_type> = old_ids
-                    .intersection(&new_ids)
-                    .filter(|id| {
-                        old.$field.iter().find(|e| &e.$id_field == *id)
-                            != new.$field.iter().find(|e| &e.$id_field == *id)
-                    })
-                    .cloned()
-                    .collect();
-                (added, removed, modified)
+                $crate::diff_entries_by_id(&old.$field, &new.$field, |entry| {
+                    entry.$id_field.clone()
+                })
             }
         }
     };

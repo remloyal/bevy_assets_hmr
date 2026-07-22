@@ -9,6 +9,9 @@ use bevy::reflect::TypePath;
 use bevy_assets_hmr::{ConfigDiff, SimpleConfigDiff};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use uuid::Uuid;
 
 /// Simplified test database that mimics zz_plot's `Vec<Entry>` pattern.
 #[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -380,7 +383,7 @@ fn derive_config_diff_with_u32_id_type_works() {
             DerivedU32Entry { id: 1, value: 10 }, // unchanged
             DerivedU32Entry { id: 2, value: 99 }, // modified
             DerivedU32Entry { id: 4, value: 40 }, // added
-            // id 3 removed
+                                                  // id 3 removed
         ],
     };
     let (added, removed, modified) = DerivedU32Database::diff(&old, &new);
@@ -425,4 +428,136 @@ fn impl_config_diff_macro_with_u32_id_type_works() {
     assert_eq!(added, [30u32].into_iter().collect());
     assert!(removed.is_empty());
     assert_eq!(modified, [20u32].into_iter().collect());
+}
+
+#[test]
+fn duplicate_ids_are_reported_as_modified() {
+    let old = DerivedU32Database {
+        entries: vec![DerivedU32Entry { id: 1, value: 10 }],
+    };
+    let new = DerivedU32Database {
+        entries: vec![
+            DerivedU32Entry { id: 1, value: 10 },
+            DerivedU32Entry { id: 1, value: 10 },
+        ],
+    };
+
+    let (added, removed, modified) = DerivedU32Database::diff(&old, &new);
+    assert!(added.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(modified, [1].into_iter().collect());
+}
+
+#[derive(Clone, Debug, PartialEq, ConfigDiff)]
+#[config_diff(field = "entries", id = "id", id_type = "Uuid")]
+struct UuidDatabase {
+    entries: Vec<UuidEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct UuidEntry {
+    id: Uuid,
+    value: u32,
+}
+
+#[test]
+fn derive_config_diff_with_uuid_id_type_works() {
+    let unchanged_id = Uuid::from_u128(1);
+    let modified_id = Uuid::from_u128(2);
+    let removed_id = Uuid::from_u128(3);
+    let added_id = Uuid::from_u128(4);
+    let old = UuidDatabase {
+        entries: vec![
+            UuidEntry {
+                id: unchanged_id,
+                value: 10,
+            },
+            UuidEntry {
+                id: modified_id,
+                value: 20,
+            },
+            UuidEntry {
+                id: removed_id,
+                value: 30,
+            },
+        ],
+    };
+    let new = UuidDatabase {
+        entries: vec![
+            UuidEntry {
+                id: unchanged_id,
+                value: 10,
+            },
+            UuidEntry {
+                id: modified_id,
+                value: 99,
+            },
+            UuidEntry {
+                id: added_id,
+                value: 40,
+            },
+        ],
+    };
+
+    let (added, removed, modified) = UuidDatabase::diff(&old, &new);
+    assert_eq!(added, [added_id].into_iter().collect());
+    assert_eq!(removed, [removed_id].into_iter().collect());
+    assert_eq!(modified, [modified_id].into_iter().collect());
+}
+
+static ID_EQUALITY_CHECKS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Debug)]
+struct CountingId(u32);
+
+impl PartialEq for CountingId {
+    fn eq(&self, other: &Self) -> bool {
+        ID_EQUALITY_CHECKS.fetch_add(1, Ordering::Relaxed);
+        self.0 == other.0
+    }
+}
+
+impl Eq for CountingId {}
+
+impl Hash for CountingId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, ConfigDiff)]
+#[config_diff(field = "entries", id = "id", id_type = "CountingId")]
+struct CountingDatabase {
+    entries: Vec<CountingEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CountingEntry {
+    id: CountingId,
+    value: u32,
+}
+
+#[test]
+fn ten_thousand_entry_diff_uses_linear_id_comparisons() {
+    const ENTRY_COUNT: usize = 10_000;
+    let old = CountingDatabase {
+        entries: (0..ENTRY_COUNT)
+            .map(|index| CountingEntry {
+                id: CountingId(index as u32),
+                value: index as u32,
+            })
+            .collect(),
+    };
+    let mut new = old.clone();
+    new.entries[ENTRY_COUNT / 2].value += 1;
+
+    ID_EQUALITY_CHECKS.store(0, Ordering::Relaxed);
+    let (_, _, modified) = CountingDatabase::diff(&old, &new);
+    let equality_checks = ID_EQUALITY_CHECKS.load(Ordering::Relaxed);
+
+    assert_eq!(modified, [CountingId(5_000)].into_iter().collect());
+    assert!(
+        equality_checks < ENTRY_COUNT * 50,
+        "expected average O(n) id comparisons, got {equality_checks} for {ENTRY_COUNT} entries"
+    );
 }

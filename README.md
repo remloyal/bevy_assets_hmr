@@ -100,7 +100,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// # 约束
 /// - `PartialEq`：diff 检测 modified 条目
-/// - `Entry` 的 `Eq + Hash`：让 id 可入 HashSet
+/// - `id` 字段的 `Eq + Hash + Clone`：用于建立条目索引
 #[derive(
     Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff,
 )]
@@ -120,6 +120,8 @@ pub struct NpcEntry {
 `#[config_diff]` 的选项：
 - `field = "npcs"`：指定 `Vec<Entry>` 字段名（省略时自动找第一个 `Vec<_>` 字段）
 - `id = "id"`：指定 entry 的 id 字段名（省略时默认 `"id"`）
+
+derive 和 `impl_config_diff!` 都会先建立 `ID -> &Entry` HashMap，added、removed、modified 的整体计算平均为 O(n)。同一版本中出现重复 ID 时会记录 error，并把重复 ID 归入 modified，避免静默选择任意条目。
 
 对于非 Vec 模式（如单对象配置 `UiTheme`），手动实现 `ConfigDiff`：
 
