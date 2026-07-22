@@ -21,8 +21,8 @@
 //! ```ignore
 //! app.add_plugins(DefaultPlugins) // 需在 Cargo.toml 显式启用 `bevy/file_watcher` feature
 //!     .add_plugins(ConfigHmrPlugin::default())
-//!     .watch_asset::<Image>("textures/player.png")
-//!     .watch_asset::<Scene>("models/character.gltf#Scene0");
+//!     .watch_asset::<Image>()
+//!     .watch_asset::<Scene>();
 //!
 //! // Subscribe:
 //! fn on_image_changed(mut reader: MessageReader<AssetChanged<Image>>) {
@@ -260,27 +260,60 @@ impl<A: Asset> AssetBindCache<A> {
     }
 }
 
-/// Event dispatched when an asset of type `A` has been modified (hot-reloaded
-/// from disk by `AssetServer`).
-#[derive(Message, Clone)]
-pub struct AssetChanged<A: Asset + Clone + Send + Sync + 'static> {
+/// Event dispatched when an asset of type `A` has been added or modified
+/// (including hot reloads from disk by `AssetServer`).
+///
+/// The asset value is deliberately not embedded in this message. Large assets
+/// such as Bevy's `Image` own decoded byte buffers, so cloning the
+/// value on every hot reload can stall the main thread and temporarily double
+/// its memory use. Consumers that need the value can query [`bevy::asset::Assets<A>`]
+/// using [`asset_id`](Self::asset_id), or call [`asset`](Self::asset).
+#[derive(Message)]
+pub struct AssetChanged<A: Asset> {
     pub asset_id: AssetId<A>,
     pub target_entities: Vec<Entity>,
     /// Populated from `AssetBindCache::path_registry` when available.
     pub source_path: String,
-    pub new_asset: A,
+}
+
+impl<A: Asset> Clone for AssetChanged<A> {
+    fn clone(&self) -> Self {
+        Self {
+            asset_id: self.asset_id,
+            target_entities: self.target_entities.clone(),
+            source_path: self.source_path.clone(),
+        }
+    }
+}
+
+impl<A: Asset> AssetChanged<A> {
+    /// Look up the current asset value without cloning it into the message.
+    pub fn asset<'a>(&self, assets: &'a bevy::asset::Assets<A>) -> Option<&'a A> {
+        assets.get(self.asset_id)
+    }
 }
 
 /// Event dispatched when an asset of type `A` has been **removed**.
-#[derive(Message, Clone)]
-pub struct AssetRemoved<A: Asset + Clone + Send + Sync + 'static> {
+#[derive(Message)]
+pub struct AssetRemoved<A: Asset> {
     pub asset_id: AssetId<A>,
     pub target_entities: Vec<Entity>,
     pub source_path: String,
     pub _marker: std::marker::PhantomData<A>,
 }
 
-impl<A: Asset + Clone + Send + Sync + 'static> Default for AssetRemoved<A> {
+impl<A: Asset> Clone for AssetRemoved<A> {
+    fn clone(&self) -> Self {
+        Self {
+            asset_id: self.asset_id,
+            target_entities: self.target_entities.clone(),
+            source_path: self.source_path.clone(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<A: Asset> Default for AssetRemoved<A> {
     fn default() -> Self {
         Self {
             asset_id: AssetId::default(),
@@ -327,9 +360,8 @@ pub fn asset_bind_cleanup_system<A: Asset>(
 /// - [`AssetChanged<A>`] on `Added` / `Modified` (with `source_path` filled
 ///   from [`AssetBindCache::path_registry`] when available).
 /// - [`AssetRemoved<A>`] on `Removed` (so subscribers can do cleanup).
-pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
+pub fn asset_watcher_system<A: Asset>(
     mut asset_events: MessageReader<AssetEvent<A>>,
-    assets: Res<bevy::asset::Assets<A>>,
     cache: Res<AssetBindCache<A>>,
     mut changed_evts: MessageWriter<AssetChanged<A>>,
     mut removed_evts: MessageWriter<AssetRemoved<A>>,
@@ -338,9 +370,6 @@ pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
         match evt {
             AssetEvent::Added { id } | AssetEvent::Modified { id } => {
                 let id = *id;
-                let Some(asset) = assets.get(id) else {
-                    continue;
-                };
                 let target_entities: Vec<Entity> = cache
                     .get_entities(&id)
                     .map(|s| s.iter().copied().collect())
@@ -351,9 +380,8 @@ pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
                     asset_id: id,
                     target_entities,
                     source_path,
-                    new_asset: asset.clone(),
                 });
-                bevy::log::info!(
+                bevy::log::debug!(
                     "[HMR] AssetChanged<{}> asset_id={:?}，关联实体数={}",
                     std::any::type_name::<A>(),
                     id,
@@ -374,7 +402,7 @@ pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
                     source_path,
                     _marker: std::marker::PhantomData,
                 });
-                bevy::log::info!(
+                bevy::log::debug!(
                     "[HMR] AssetRemoved<{}> asset_id={:?}，关联实体数={}",
                     std::any::type_name::<A>(),
                     id,

@@ -213,7 +213,8 @@ pub trait ConfigHmrAppExt {
     /// 1. **Entity binding** via `AssetBind<A>` — attach to entities so the
     ///    framework knows which entities depend on a given handle.
     /// 2. **Change notification** via `AssetChanged<A>` — dispatched on
-    ///    `AssetEvent::Added` / `Modified`.
+    ///    `AssetEvent::Added` / `Modified`. The message carries the asset id,
+    ///    not a clone of the asset; query `Assets<A>` when the value is needed.
     ///
     /// Unlike `register_asset`, this does **not**:
     /// - require `ConfigDiff` or `HmrSource`
@@ -239,7 +240,7 @@ pub trait ConfigHmrAppExt {
     /// commands.spawn((Sprite::from_image(handle.clone()), AssetBind::new(handle)));
     /// // Subscribe via MessageReader<AssetChanged<Image>> in your system.
     /// ```
-    fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self) -> &mut Self;
+    fn watch_asset<A: Asset>(&mut self) -> &mut Self;
 }
 
 impl ConfigHmrAppExt for App {
@@ -313,7 +314,7 @@ impl ConfigHmrAppExt for App {
         self
     }
 
-    fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self) -> &mut Self {
+    fn watch_asset<A: Asset>(&mut self) -> &mut Self {
         use crate::watcher::AssetBindCache;
 
         // Per-type resources for entity binding tracking.

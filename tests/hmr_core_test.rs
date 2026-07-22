@@ -516,9 +516,9 @@ fn removed_asset_without_prior_snapshot_does_not_dispatch() {
 // watch_asset tests: file-level hot-reload for arbitrary Asset types
 // ===========================================================================
 
-/// A simple Asset that does NOT implement ConfigDiff - used to verify
-/// `watch_asset` works without the diff machinery.
-#[derive(Asset, TypePath, Clone, Debug, PartialEq, Default)]
+/// A simple Asset that implements neither `Clone` nor `ConfigDiff`. This
+/// verifies that `watch_asset` dispatches zero-copy notifications.
+#[derive(Asset, TypePath, Debug, PartialEq, Default)]
 struct DummyTexture {
     width: u32,
     height: u32,
@@ -581,7 +581,8 @@ fn watch_asset_dispatches_asset_changed_on_modified() {
         assert!(captured.0.is_some(), "AssetChanged should fire on Added");
         let evt = captured.0.as_ref().unwrap();
         assert_eq!(evt.asset_id, asset_id);
-        assert_eq!(evt.new_asset.width, 64);
+        let assets = app.world().resource::<Assets<DummyTexture>>();
+        assert_eq!(evt.asset(&assets).unwrap().width, 64);
     }
 
     // Clear the capture.
@@ -609,9 +610,11 @@ fn watch_asset_dispatches_asset_changed_on_modified() {
         .as_ref()
         .expect("AssetChanged should fire on Modified");
     assert_eq!(evt.asset_id, asset_id);
+    let assets = app.world().resource::<Assets<DummyTexture>>();
     assert_eq!(
-        evt.new_asset.width, 128,
-        "AssetChanged should carry the new asset value"
+        evt.asset(&assets).unwrap().width,
+        128,
+        "AssetChanged should resolve the current asset without cloning it"
     );
 }
 

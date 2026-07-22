@@ -505,10 +505,14 @@ app.add_plugins(ConfigHmrPlugin::default())
 Bevy 的 `AssetServer`（启用 `bevy/file_watcher` 时）已自动处理文件的磁盘监听、重载和 GPU 上传。`watch_asset` 在此基础上附加：
 
 1. **实体绑定追踪**：`AssetBind<A>` 组件 + `AssetBindCache<A>` 缓存
-2. **变更通知事件**：`AssetChanged<A>` Message（携带 `asset_id`、`new_asset`、`target_entities`、`source_path`）
+2. **变更通知事件**：`AssetChanged<A>` Message（携带 `asset_id`、`target_entities`、`source_path`）
 3. **删除通知事件**：`AssetRemoved<A>` Message（资产被删除时派发，携带 `asset_id`、`target_entities`、`source_path`）
 
 > `source_path` 从 `AssetBind<A>` 注册时记录的 `Handle::path()` 自动填充。若 handle 无路径（如直接 `Assets::insert`），则为空字符串。
+>
+> `AssetChanged<A>` 不复制资产值。图片等大型资产包含解码后的字节缓冲，复制进
+> Message 会造成明显的帧停顿和内存峰值。需要读取新值时调用
+> `event.asset(&assets)`，或用 `event.asset_id` 查询 `Assets<A>`。
 
 ### 使用示例
 
@@ -535,9 +539,18 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     ));
 }
 
-fn on_image_changed(mut reader: MessageReader<AssetChanged<Image>>) {
+fn on_image_changed(
+    mut reader: MessageReader<AssetChanged<Image>>,
+    images: Res<Assets<Image>>,
+) {
     for evt in reader.read() {
-        info!("图片已更新，{} 个实体受影响", evt.target_entities.len());
+        if let Some(image) = evt.asset(&images) {
+            info!(
+                "图片已更新，{} 个实体受影响，尺寸 {:?}",
+                evt.target_entities.len(),
+                image.texture_descriptor.size,
+            );
+        }
     }
 }
 ```
