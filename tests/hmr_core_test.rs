@@ -10,13 +10,14 @@
 //! 4. `LastSnapshot<T>` is updated to the new version after dispatch.
 //! 5. Empty diffs (content unchanged) are not dispatched.
 
-use bevy::asset::{Asset, AssetId, Assets, Handle};
+use bevy::asset::{Asset, AssetId, Assets, Handle, UntypedAssetId};
 use bevy::ecs::message::{MessageReader, Messages};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy_assets_hmr::{
     ConfigAsset, ConfigBind, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh,
-    ConfigReloadFailed, ConfigRemoved, HandleEntityCache, LastSnapshot, RefreshDebouncer,
+    ConfigReloadFailed, ConfigRemoved, HandleEntityCache, HmrSource, LastSnapshot,
+    RefreshDebouncer,
 };
 // 注：`ConfigRefresh<TestDb>` 的泛型是 Config 类型（`ConfigAsset<TestDb>::Config = TestDb`），
 // 所以仍是 `ConfigRefresh<TestDb>`。`RefreshDebouncer` / `LastSnapshot` 的泛型是
@@ -869,4 +870,608 @@ fn no_rollback_when_no_snapshot_exists() {
     // Asset should NOT be in Assets (nothing was re-inserted).
     let assets = app.world().resource::<Assets<ConfigAsset<TestDb>>>();
     assert!(assets.get(asset_id).is_none());
+}
+
+// ===========================================================================
+// Cooldown tests: verify the write-back loop protection
+// ===========================================================================
+
+#[test]
+fn cooldown_skips_events_within_window() {
+    let mut app = make_app(Duration::from_millis(0));
+
+    let asset_id = make_id(700);
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "a".into(),
+                        n: 1,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "a".into(),
+                        n: 2,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let captured = app.world().resource::<CapturedRefresh>();
+    assert!(
+        captured.0.is_some(),
+        "first modification should dispatch a refresh"
+    );
+
+    {
+        let debouncer = app
+            .world()
+            .resource::<RefreshDebouncer<ConfigAsset<TestDb>>>();
+        assert!(
+            debouncer.flushed_at.contains_key(&asset_id),
+            "flushed_at should be recorded after a successful flush"
+        );
+    }
+
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "a".into(),
+                        n: 3,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+    app.world_mut().resource_mut::<CapturedRefresh>().0 = None;
+
+    for _ in 0..5 {
+        app.update();
+    }
+
+    let captured = app.world().resource::<CapturedRefresh>();
+    assert!(
+        captured.0.is_none(),
+        "cooldown should skip events within the window"
+    );
+}
+
+#[test]
+fn cooldown_allows_events_after_window_elapses() {
+    let mut app = make_app(Duration::from_millis(0));
+
+    let asset_id = make_id(800);
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "a".into(),
+                        n: 1,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "a".into(),
+                        n: 2,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<CapturedRefresh>().0 = None;
+
+    {
+        let mut debouncer = app
+            .world_mut()
+            .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
+        let long_ago = std::time::Instant::now()
+            - debouncer.cooldown
+            - std::time::Duration::from_secs(1);
+        debouncer.flushed_at.insert(asset_id, long_ago);
+    }
+
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "a".into(),
+                        n: 3,
+                    }],
+                },
+                source_path: "data/test.ron".into(),
+            },
+        );
+    }
+    for _ in 0..5 {
+        app.update();
+    }
+
+    let captured = app.world().resource::<CapturedRefresh>();
+    assert!(
+        captured.0.is_some(),
+        "cooldown should allow events after the window elapses"
+    );
+}
+
+#[test]
+fn cache_validation_system_corrects_drift() {
+    let mut app = make_app(Duration::from_millis(50));
+
+    let asset_id = make_id(900);
+    let entity = app
+        .world_mut()
+        .spawn(ConfigBind::<ConfigAsset<TestDb>>::with_id(asset_id))
+        .id();
+
+    for _ in 0..3 {
+        app.update();
+    }
+
+    {
+        let cache = app
+            .world()
+            .resource::<HandleEntityCache<ConfigAsset<TestDb>>>();
+        assert!(cache.get_entities(&asset_id).is_some());
+    }
+
+    {
+        let mut cache = app
+            .world_mut()
+            .resource_mut::<HandleEntityCache<ConfigAsset<TestDb>>>();
+        cache.remove(entity);
+    }
+
+    {
+        let cache = app
+            .world()
+            .resource::<HandleEntityCache<ConfigAsset<TestDb>>>();
+        assert!(
+            cache.get_entities(&asset_id).is_none(),
+            "drift: entity should be missing from cache before validation"
+        );
+    }
+
+    let entity2 = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .entity_mut(entity2)
+        .insert(ConfigBind::<ConfigAsset<TestDb>>::with_id(asset_id));
+
+    for _ in 0..3 {
+        app.update();
+    }
+
+    {
+        let cache = app
+            .world()
+            .resource::<HandleEntityCache<ConfigAsset<TestDb>>>();
+        let bound: Vec<_> = cache
+            .get_entities(&asset_id)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default();
+        assert!(
+            bound.contains(&entity2),
+            "entity2 should be in cache after registry system runs"
+        );
+    }
+}
+
+// ===========================================================================
+// Dependency chain (cascade) tests
+// ===========================================================================
+
+/// A child config: simple String-keyed table. No dependencies.
+///
+/// We implement HmrSource manually instead of going through HmrAsset
+/// (which requires DeserializeOwned) because this test inserts assets
+/// directly via Assets::insert and doesn't need serde.
+#[derive(Asset, TypePath, Clone, Debug, PartialEq, Default, ConfigDiff)]
+#[config_diff(field = "items", id = "id")]
+struct ChildDb {
+    items: Vec<ChildItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ChildItem {
+    id: String,
+    v: u32,
+}
+
+impl HmrSource for ChildDb {
+    type Config = ChildDb;
+    fn config(&self) -> &ChildDb {
+        self
+    }
+    fn source_path(&self) -> &str {
+        ""
+    }
+    fn from_config(config: ChildDb, _source_path: String) -> Self {
+        config
+    }
+}
+
+/// A parent config that holds a Handle<ConfigAsset<ChildDb>>. The
+/// #[derive(Asset)] auto-generates VisitAssetDependencies which walks
+/// Handle<*> fields and feeds them to the dependency graph.
+#[derive(Asset, TypePath, Clone, Debug, PartialEq, Default, ConfigDiff)]
+#[config_diff(field = "items", id = "id")]
+struct ParentDb {
+    items: Vec<ParentItem>,
+    /// `#[dependency]` marks this `Handle<ChildDb>` field as an asset
+    /// dependency for the `VisitAssetDependencies` derive macro.
+    /// Without it, `ParentDb::visit_dependencies` would not visit this
+    /// handle, and the dependency graph would miss the edge.
+    #[dependency]
+    child_handle: Handle<ChildDb>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ParentItem {
+    id: String,
+}
+
+impl HmrSource for ParentDb {
+    type Config = ParentDb;
+    fn config(&self) -> &ParentDb {
+        self
+    }
+    fn source_path(&self) -> &str {
+        ""
+    }
+    fn from_config(config: ParentDb, _source_path: String) -> Self {
+        config
+    }
+}
+
+fn make_cascade_app(debounce_window: Duration) -> App {
+    use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
+    let mut app = App::new();
+    app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
+    app.add_plugins(ConfigHmrPlugin { debounce_window });
+    app.setup_hmr_headless();
+    app.init_asset::<ChildDb>();
+    app.init_asset::<ParentDb>();
+    app.register_asset::<ChildDb>("data/child.ron");
+    app.register_asset::<ParentDb>("data/parent.ron");
+    app.insert_resource(CapturedRefresh::default());
+    app
+}
+
+#[derive(Resource, Default)]
+struct CapturedParentRefresh(Option<ConfigRefresh<ParentDb>>);
+
+/// Capture ConfigRefresh<ParentDb> events.
+fn capture_parent_refresh_system(
+    mut reader: MessageReader<ConfigRefresh<ParentDb>>,
+    mut captured: ResMut<CapturedParentRefresh>,
+) {
+    for refresh in reader.read() {
+        captured.0 = Some(refresh.clone());
+    }
+}
+
+/// Helper: insert a child asset into the world and return its strong
+/// handle. The returned handle's `AssetId` is used as the dependency edge
+/// key in `DependencyGraph`.
+fn insert_child_and_handle(app: &mut App, child: ChildDb) -> Handle<ChildDb> {
+    app.world_mut()
+        .resource_mut::<Assets<ChildDb>>()
+        .add(child)
+}
+
+#[test]
+fn dependency_graph_is_populated_on_parent_load() {
+    use bevy_assets_hmr::DependencyGraph;
+
+    let mut app = make_cascade_app(Duration::from_millis(0));
+    app.insert_resource(CapturedParentRefresh::default());
+    app.add_systems(Update, capture_parent_refresh_system);
+
+    let child_id = AssetId::<ChildDb>::Uuid {
+        uuid: Uuid::from_u128(1100),
+    };
+    let child_handle = insert_child_and_handle(
+        &mut app,
+        ChildDb {
+            items: vec![ChildItem {
+                id: "c1".into(),
+                v: 1,
+            }],
+        },
+    );
+    let actual_child_id = child_handle.id();
+    let parent_id = AssetId::<ParentDb>::Uuid {
+        uuid: Uuid::from_u128(1101),
+    };
+    {
+        let mut assets = app.world_mut().resource_mut::<Assets<ParentDb>>();
+        let _ = assets.insert(
+            parent_id,
+            ParentDb {
+                items: vec![ParentItem { id: "p1".into() }],
+                child_handle: child_handle.clone(),
+            },
+        );
+    }
+
+    for _ in 0..10 {
+        app.update();
+    }
+
+    let graph = app.world().resource::<DependencyGraph>();
+    let parents = graph.parents_of(actual_child_id.untyped());
+    assert!(
+        !parents.is_empty(),
+        "DependencyGraph should record child -> parent edge"
+    );
+    let has_parent = parents.iter().any(|(p, _)| *p == parent_id.untyped());
+    assert!(has_parent, "parent asset id should appear in parents_of");
+}
+
+#[test]
+fn cascade_triggers_config_refresh_on_parent() {
+    let mut app = make_cascade_app(Duration::from_millis(0));
+    app.insert_resource(CapturedParentRefresh::default());
+    app.add_systems(Update, capture_parent_refresh_system);
+
+    let child_id = AssetId::<ChildDb>::Uuid {
+        uuid: Uuid::from_u128(1200),
+    };
+    let child_handle = insert_child_and_handle(
+        &mut app,
+        ChildDb {
+            items: vec![ChildItem {
+                id: "c1".into(),
+                v: 1,
+            }],
+        },
+    );
+    let actual_child_id = child_handle.id();
+    let parent_id = AssetId::<ParentDb>::Uuid {
+        uuid: Uuid::from_u128(1201),
+    };
+    {
+        let mut parent_assets = app.world_mut().resource_mut::<Assets<ParentDb>>();
+        let _ = parent_assets.insert(
+            parent_id,
+            ParentDb {
+                items: vec![ParentItem { id: "p1".into() }],
+                child_handle: child_handle.clone(),
+            },
+        );
+    }
+
+    for _ in 0..5 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<CapturedParentRefresh>().0 = None;
+
+    {
+        let mut child_assets = app.world_mut().resource_mut::<Assets<ChildDb>>();
+        let _ = child_assets.insert(
+            actual_child_id,
+            ChildDb {
+                items: vec![ChildItem {
+                    id: "c1".into(),
+                    v: 999,
+                }],
+            },
+        );
+    }
+
+    for _ in 0..10 {
+        app.update();
+    }
+
+    let captured = app.world().resource::<CapturedParentRefresh>();
+    let evt = captured.0.as_ref().expect(
+        "cascade should have fired ConfigRefresh<ParentDb>",
+    );
+    assert!(
+        evt.changed_ids.is_empty(),
+        "cascade-fired ConfigRefresh should have empty changed_ids"
+    );
+    // Direct-mode HmrSource returns "" for source_path, so the cascade
+    // event also has an empty path. The important part is that the event
+    // fired with the parent's current value.
+    assert!(
+        evt.source_path.is_empty(),
+        "direct-mode source_path should be empty (no override)"
+    );
+}
+
+#[test]
+fn cascade_does_not_fire_for_unrelated_types() {
+    use bevy_assets_hmr::DependencyGraph;
+
+    let mut app = make_cascade_app(Duration::from_millis(0));
+    app.insert_resource(CapturedParentRefresh::default());
+    app.add_systems(Update, capture_parent_refresh_system);
+
+    let parent_id = AssetId::<ParentDb>::Uuid {
+        uuid: Uuid::from_u128(1300),
+    };
+    {
+        let mut parent_assets = app.world_mut().resource_mut::<Assets<ParentDb>>();
+        let _ = parent_assets.insert(
+            parent_id,
+            ParentDb {
+                items: vec![ParentItem { id: "p1".into() }],
+                child_handle: Handle::default(),
+            },
+        );
+    }
+
+    let unrelated_child_id = AssetId::<ChildDb>::Uuid {
+        uuid: Uuid::from_u128(1301),
+    };
+    {
+        let mut child_assets = app.world_mut().resource_mut::<Assets<ChildDb>>();
+        let _ = child_assets.insert(
+            unrelated_child_id,
+            ChildDb {
+                items: vec![ChildItem {
+                    id: "uc1".into(),
+                    v: 1,
+                }],
+            },
+        );
+    }
+
+    for _ in 0..5 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<CapturedParentRefresh>().0 = None;
+
+    {
+        let mut child_assets = app.world_mut().resource_mut::<Assets<ChildDb>>();
+        let _ = child_assets.insert(
+            unrelated_child_id,
+            ChildDb {
+                items: vec![ChildItem {
+                    id: "uc1".into(),
+                    v: 2,
+                }],
+            },
+        );
+    }
+
+    for _ in 0..10 {
+        app.update();
+    }
+
+    let graph = app.world().resource::<DependencyGraph>();
+    let parents = graph.parents_of(unrelated_child_id.untyped());
+    assert!(
+        parents.is_empty(),
+        "unrelated child should have no parents in the graph"
+    );
+
+    let captured = app.world().resource::<CapturedParentRefresh>();
+    assert!(
+        captured.0.is_none(),
+        "no cascade should fire for unrelated types"
+    );
+}
+
+/// Verify that removing the child asset triggers a cascade
+/// `ConfigRefresh<ParentDb>` (with empty `changed_ids`), so the parent
+/// subscriber can clean up any derived state.
+#[test]
+fn cascade_triggers_on_child_removed() {
+    let mut app = make_cascade_app(Duration::from_millis(0));
+    app.insert_resource(CapturedParentRefresh::default());
+    app.add_systems(Update, capture_parent_refresh_system);
+
+    let child_handle = insert_child_and_handle(
+        &mut app,
+        ChildDb {
+            items: vec![ChildItem {
+                id: "c1".into(),
+                v: 1,
+            }],
+        },
+    );
+    let actual_child_id = child_handle.id();
+    let parent_id = AssetId::<ParentDb>::Uuid {
+        uuid: Uuid::from_u128(1401),
+    };
+    {
+        let mut parent_assets = app.world_mut().resource_mut::<Assets<ParentDb>>();
+        let _ = parent_assets.insert(
+            parent_id,
+            ParentDb {
+                items: vec![ParentItem { id: "p1".into() }],
+                child_handle: child_handle.clone(),
+            },
+        );
+    }
+
+    // Let dependency graph build.
+    for _ in 0..10 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<CapturedParentRefresh>().0 = None;
+
+    // Remove the child asset - this should cascade a refresh on the
+    // parent on the next frame.
+    {
+        let mut child_assets = app.world_mut().resource_mut::<Assets<ChildDb>>();
+        child_assets.remove(actual_child_id);
+    }
+
+    for _ in 0..10 {
+        app.update();
+    }
+
+    let captured = app.world().resource::<CapturedParentRefresh>();
+    let evt = captured.0.as_ref().expect(
+        "cascade should fire ConfigRefresh<ParentDb> after child removal",
+    );
+    assert!(
+        evt.changed_ids.is_empty(),
+        "removal cascade should also have empty changed_ids"
+    );
 }

@@ -29,6 +29,7 @@ mod asset;
 mod binding;
 mod core;
 mod debounce;
+mod dependency;
 mod diff;
 mod ext;
 mod loader;
@@ -42,14 +43,18 @@ pub use binding::{
 };
 pub use core::{HmrAsset, HmrSource, LastSnapshot, cache_validation_system, hmr_core_system};
 pub use debounce::{RefreshDebouncer, flush_debounced_refresh};
+pub use dependency::{
+    CascadeQueue, DependencyGraph, cascade_dispatch_system, dependency_cleanup_system,
+    dependency_registry_system,
+};
 pub use diff::{ConfigDiff, SimpleConfigDiff};
 pub use ext::ConfigHmrAppExt;
 pub use loader::ConfigLoader;
 pub use refresh::{ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind};
 pub use registry::ConfigPathRegistry;
 pub use watcher::{
-    AssetBind, AssetBindCache, AssetBindTemplate, AssetChanged, asset_bind_cleanup_system,
-    asset_bind_registry_system, asset_watcher_system,
+    AssetBind, AssetBindCache, AssetBindTemplate, AssetChanged, AssetRemoved,
+    asset_bind_cleanup_system, asset_bind_registry_system, asset_watcher_system,
 };
 
 // Re-export derive macro，让用户 `use bevy_assets_hmr::ConfigDiff` 同时

@@ -348,3 +348,81 @@ fn simple_config_diff_defaults_diff_id_to_type_name() {
         "default diff_id should be the type name, got: {id}"
     );
 }
+
+// ---- derive(ConfigDiff) with id_type = "u32" ----
+
+/// A database keyed by `u32` ids, using `#[derive(ConfigDiff)]` with
+/// `id_type = "u32"` - verifies the derive macro supports non-String ids
+/// without requiring a manual `impl ConfigDiff`.
+#[derive(Clone, Debug, PartialEq, Default, ConfigDiff)]
+#[config_diff(field = "entries", id = "id", id_type = "u32")]
+struct DerivedU32Database {
+    entries: Vec<DerivedU32Entry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DerivedU32Entry {
+    id: u32,
+    value: u32,
+}
+
+#[test]
+fn derive_config_diff_with_u32_id_type_works() {
+    let old = DerivedU32Database {
+        entries: vec![
+            DerivedU32Entry { id: 1, value: 10 },
+            DerivedU32Entry { id: 2, value: 20 },
+            DerivedU32Entry { id: 3, value: 30 },
+        ],
+    };
+    let new = DerivedU32Database {
+        entries: vec![
+            DerivedU32Entry { id: 1, value: 10 }, // unchanged
+            DerivedU32Entry { id: 2, value: 99 }, // modified
+            DerivedU32Entry { id: 4, value: 40 }, // added
+            // id 3 removed
+        ],
+    };
+    let (added, removed, modified) = DerivedU32Database::diff(&old, &new);
+    assert_eq!(added, [4u32].into_iter().collect());
+    assert_eq!(removed, [3u32].into_iter().collect());
+    assert_eq!(modified, [2u32].into_iter().collect());
+}
+
+// ---- impl_config_diff! macro with u32 id type ----
+
+/// A database keyed by `u32` ids, using the `impl_config_diff!` macro with
+/// an explicit id type - verifies the macro supports non-String ids.
+#[derive(Clone, Debug, PartialEq, Default)]
+struct MacroU32Database {
+    entries: Vec<MacroU32Entry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MacroU32Entry {
+    id: u32,
+    value: u32,
+}
+
+bevy_assets_hmr::impl_config_diff!(MacroU32Database, entries, id, u32);
+
+#[test]
+fn impl_config_diff_macro_with_u32_id_type_works() {
+    let old = MacroU32Database {
+        entries: vec![
+            MacroU32Entry { id: 10, value: 100 },
+            MacroU32Entry { id: 20, value: 200 },
+        ],
+    };
+    let new = MacroU32Database {
+        entries: vec![
+            MacroU32Entry { id: 10, value: 100 }, // unchanged
+            MacroU32Entry { id: 20, value: 999 }, // modified
+            MacroU32Entry { id: 30, value: 300 }, // added
+        ],
+    };
+    let (added, removed, modified) = MacroU32Database::diff(&old, &new);
+    assert_eq!(added, [30u32].into_iter().collect());
+    assert!(removed.is_empty());
+    assert_eq!(modified, [20u32].into_iter().collect());
+}

@@ -332,6 +332,7 @@ name = "bevy_assets_hmr"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_asset_macros",
  "bevy_assets_hmr",
  "bevy_assets_hmr_derive",
  "ron",

@@ -31,26 +31,49 @@
 //!
 //! - **Struct**: 数据库类型必须实现 `PartialEq`（检测 modified 条目）
 //! - **Enum**: 枚举类型必须实现 `PartialEq`；diff 用整体比较，变了则将类型名
-//!   作为 modified id
-//! - entry 的 id 字段类型必须是 `String`
+//!   作为 modified id。枚举**不支持** `#[config_diff(...)]` 属性（会编译报错）
+//! - entry 的 id 字段类型默认是 `String`，可通过 `id_type` 指定为其他类型
+//!  （如 `u32`、`uuid::Uuid` 等 `Eq + Hash + Clone` 类型）
 //! - `field` 指定 `Vec<Entry>` 字段名；省略时自动找第一个 `Vec<_>` 字段
 //! - `id` 指定 entry 的 id 字段名；省略时默认 `"id"`
+//! - `id_type` 指定 id 字段类型；省略时默认 `"String"`
+//!
+//! # 非 String id 示例
+//!
+//! ```ignore
+//! #[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff)]
+//! #[config_diff(field = "entries", id = "id", id_type = "u32")]
+//! pub struct MonsterDatabase {
+//!     pub entries: Vec<MonsterEntry>,
+//! }
+//!
+//! #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+//! pub struct MonsterEntry {
+//!     pub id: u32,
+//!     pub name: String,
+//! }
+//! ```
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput, Ident, LitStr, Type};
+use syn::spanned::Spanned;
 
 /// Helper attribute: `#[config_diff(field = "texts", id = "id")]`
 struct ConfigDiffAttr {
     field: Option<Ident>,
     id: Option<Ident>,
+    /// The type of the id field, e.g. `String`, `u32`, `Uuid`.
+    /// Defaults to `String` when not specified.
+    id_type: Option<Type>,
 }
 
 impl syn::parse::Parse for ConfigDiffAttr {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut field = None;
         let mut id = None;
+        let mut id_type = None;
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             let _: syn::Token![=] = input.parse()?;
@@ -58,16 +81,20 @@ impl syn::parse::Parse for ConfigDiffAttr {
             match key.to_string().as_str() {
                 "field" => field = Some(value.parse()?),
                 "id" => id = Some(value.parse()?),
+                "id_type" => id_type = Some(value.parse()?),
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown config_diff option `{}`; expected `field` or `id`", other),
+                        format!(
+                            "unknown config_diff option `{}`; expected `field`, `id`, or `id_type`",
+                            other
+                        ),
                     ))
                 }
             }
             let _ = input.parse::<syn::Token![,]>();
         }
-        Ok(Self { field, id })
+        Ok(Self { field, id, id_type })
     }
 }
 
@@ -88,29 +115,33 @@ pub fn derive_config_diff(input: TokenStream) -> TokenStream {
             let id_field = resolve_id(&input).unwrap_or_else(|| {
                 Ident::new("id", proc_macro2::Span::call_site())
             });
+            // Resolve id_type (defaults to String).
+            let id_type = resolve_id_type(&input).unwrap_or_else(|| {
+                syn::parse_quote!(String)
+            });
             let field_ident = &field;
             let id_ident = &id_field;
             quote! {
                 impl #impl_generics #crate_path::ConfigDiff for #db_name #ty_generics #where_clause {
-                    type Id = String;
+                    type Id = #id_type;
                     fn diff(
                         old: &Self,
                         new: &Self,
                     ) -> (
-                        std::collections::HashSet<String>,
-                        std::collections::HashSet<String>,
-                        std::collections::HashSet<String>,
+                        std::collections::HashSet<#id_type>,
+                        std::collections::HashSet<#id_type>,
+                        std::collections::HashSet<#id_type>,
                     ) {
                         use std::collections::HashSet;
-                        let old_ids: HashSet<String> =
+                        let old_ids: HashSet<#id_type> =
                             old.#field_ident.iter().map(|e| e.#id_ident.clone()).collect();
-                        let new_ids: HashSet<String> =
+                        let new_ids: HashSet<#id_type> =
                             new.#field_ident.iter().map(|e| e.#id_ident.clone()).collect();
-                        let added: HashSet<String> =
+                        let added: HashSet<#id_type> =
                             new_ids.difference(&old_ids).cloned().collect();
-                        let removed: HashSet<String> =
+                        let removed: HashSet<#id_type> =
                             old_ids.difference(&new_ids).cloned().collect();
-                        let modified: HashSet<String> = old_ids
+                        let modified: HashSet<#id_type> = old_ids
                             .intersection(&new_ids)
                             .filter(|id| {
                                 old.#field_ident.iter().find(|e| &e.#id_ident == *id)
@@ -124,6 +155,21 @@ pub fn derive_config_diff(input: TokenStream) -> TokenStream {
             }
         }
         syn::Data::Enum(_) => {
+            // Enums use whole-value PartialEq diff - the `#[config_diff(...)]`
+            // attribute (field/id/id_type) is only meaningful for struct Vec
+            // fields. If a user wrote it on an enum, emit a clear compile
+            // error instead of silently ignoring it.
+            for attr in &input.attrs {
+                if attr.path().is_ident("config_diff") {
+                    return syn::Error::new(
+                        attr.meta.span(),
+                        "`#[config_diff(...)]` attributes are not supported on enums; \
+                         enums use whole-value `PartialEq` diff (no field/id/id_type needed)",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            }
             // Enum: whole-value comparison via PartialEq. If old != new,
             // report the type name as the single modified id; otherwise
             // return an empty diff. This mirrors the manual "single config
@@ -206,6 +252,21 @@ fn resolve_id(input: &DeriveInput) -> Option<Ident> {
         if attr.path().is_ident("config_diff") {
             if let Ok(attr_args) = attr.parse_args::<ConfigDiffAttr>() {
                 return attr_args.id;
+            }
+        }
+    }
+    None
+}
+
+/// 从 `#[config_diff]` attribute 解析 id 字段类型（默认 `String`）。
+///
+/// 用法：`#[config_diff(field = "entries", id = "id", id_type = "u32")]`
+/// 或 `#[config_diff(id_type = "uuid::Uuid")]` 等。
+fn resolve_id_type(input: &DeriveInput) -> Option<Type> {
+    for attr in &input.attrs {
+        if attr.path().is_ident("config_diff") {
+            if let Ok(attr_args) = attr.parse_args::<ConfigDiffAttr>() {
+                return attr_args.id_type;
             }
         }
     }

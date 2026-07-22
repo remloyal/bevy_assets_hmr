@@ -44,12 +44,18 @@ bevy = { version = "0.19.0", default-features = false, features = [
     "async-io",
 ] }
 bevy_assets_hmr = { path = "." }
+bevy_asset_macros = "0.19.0"
 uuid = "1"
 
 # 临时验证 example：bsn! + AssetBind<Image> 是否可编译
 [[example]]
 name = "bsn_asset_bind"
 path = "examples/bsn_asset_bind.rs"
+
+# 依赖链级联示例：演示 ParentDb -> ChildDb 跨类型级联
+[[example]]
+name = "dependency_cascade"
+path = "examples/dependency_cascade.rs"
 
 # HMR 文件监听由消费方启用 `bevy/file_watcher` feature 实现（bevy 0.19
 # 依赖 notify-debouncer-full ^0.7.0，现已可用）。本 crate 只负责

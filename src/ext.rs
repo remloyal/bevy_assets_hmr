@@ -138,6 +138,57 @@ pub trait ConfigHmrAppExt {
         source_path: &str,
     ) -> &mut Self;
 
+    /// Insert an asset directly (bypasses `AssetServer`) - 直接模式.
+    ///
+    /// Direct-mode counterpart of [`insert_config`](Self::insert_config).
+    /// Seeds an `Assets<A>` entry and eagerly initializes the `LastSnapshot<A>`
+    /// snapshot, eliminating the ~6 lines of boilerplate otherwise required:
+    ///
+    /// ```ignore
+    /// // Without this helper, direct-mode users must write:
+    /// let mut assets = app.world_mut().resource_mut::<Assets<MyAsset>>();
+    /// let _ = assets.insert(id, initial.clone());
+    /// let mut snapshots = app.world_mut().resource_mut::<LastSnapshot<MyAsset>>();
+    /// snapshots.map.insert(id, initial);
+    ///
+    /// // With this helper:
+    /// app.insert_asset(id, initial, "data/my.custom");
+    /// ```
+    ///
+    /// The snapshot is pre-populated so subscribers won't receive a spurious
+    /// "first load" `AssetEvent::Added` refresh.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use bevy::asset::{Asset, AssetId};
+    /// # use bevy::prelude::*;
+    /// # use bevy::reflect::TypePath;
+    /// # use serde::{Deserialize, Serialize};
+    /// # use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, HmrSource, SimpleConfigDiff};
+    /// # #[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+    /// # struct LevelAsset { id: String, max_turns: u32 }
+    /// # impl SimpleConfigDiff for LevelAsset { fn diff_id() -> &'static str { "level" } }
+    /// # impl HmrSource for LevelAsset {
+    /// #     type Config = LevelAsset;
+    /// #     fn config(&self) -> &Self::Config { self }
+    /// #     fn from_config(c: Self::Config, _p: String) -> Self { c }
+    /// # }
+    /// # let mut app = App::new();
+    /// # app.add_plugins(bevy::asset::AssetPlugin::default());
+    /// # app.add_plugins(ConfigHmrPlugin::default());
+    /// # app.init_asset::<LevelAsset>();
+    /// # app.register_asset::<LevelAsset>("levels/level_1.level");
+    /// use uuid::Uuid;
+    /// let id = AssetId::Uuid { uuid: Uuid::new_v4() };
+    /// app.insert_asset(id, LevelAsset { id: "lv_1".into(), max_turns: 10 }, "levels/level_1.level");
+    /// ```
+    fn insert_asset<A: HmrSource<Config = A> + Clone>(
+        &mut self,
+        id: AssetId<A>,
+        asset: A,
+        source_path: &str,
+    ) -> &mut Self;
+
     /// Configure the app for headless HMR (no render world).
     ///
     /// Sets `MessageRegistry::should_update = Always` so `Messages` buffers
@@ -215,6 +266,15 @@ impl ConfigHmrAppExt for App {
             .add_message::<ConfigRemoved<T>>()
             .add_message::<ConfigReloadFailed<T>>();
 
+        // Init shared dependency resources (idempotent: skip if already
+        // added by an earlier register_config/register_asset call).
+        if self.world().get_resource::<crate::dependency::DependencyGraph>().is_none() {
+            self.init_resource::<crate::dependency::DependencyGraph>();
+        }
+        if self.world().get_resource::<crate::dependency::CascadeQueue>().is_none() {
+            self.init_resource::<crate::dependency::CascadeQueue>();
+        }
+
         #[cfg(feature = "dev")]
         {
             self.add_systems(
@@ -224,6 +284,9 @@ impl ConfigHmrAppExt for App {
                     crate::binding::config_binding_cleanup_system::<ConfigAsset<T>>,
                     crate::core::hmr_core_system::<ConfigAsset<T>>,
                     crate::debounce::flush_debounced_refresh::<ConfigAsset<T>>,
+                    crate::dependency::dependency_registry_system::<ConfigAsset<T>>,
+                    crate::dependency::dependency_cleanup_system::<ConfigAsset<T>>,
+                    crate::dependency::cascade_dispatch_system::<ConfigAsset<T>>,
                 )
                     .chain(),
             )
@@ -287,6 +350,32 @@ impl ConfigHmrAppExt for App {
         self
     }
 
+    fn insert_asset<A: HmrSource<Config = A> + Clone>(
+        &mut self,
+        id: AssetId<A>,
+        asset: A,
+        source_path: &str,
+    ) -> &mut Self {
+        // Insert into Assets<A>.
+        {
+            let mut assets = self.world_mut().resource_mut::<Assets<A>>();
+            let _ = assets.insert(id, asset.clone());
+        }
+        // Eagerly initialize both the snapshot map and the source_path entry
+        // so subscribers won't receive a spurious "first load" refresh and so
+        // ConfigRemoved events can still carry the path after removal.
+        {
+            let mut snapshots = self.world_mut().resource_mut::<LastSnapshot<A>>();
+            snapshots.map.insert(id, asset);
+            if !source_path.is_empty() {
+                snapshots
+                    .source_paths
+                    .insert(id, source_path.to_string());
+            }
+        }
+        self
+    }
+
     fn register_asset<A: HmrSource>(&mut self, path: &str) -> &mut Self {
         let debounce_window = self
             .world()
@@ -303,6 +392,14 @@ impl ConfigHmrAppExt for App {
             .add_message::<ConfigRemoved<A::Config>>()
             .add_message::<ConfigReloadFailed<A::Config>>();
 
+        // Init shared dependency resources (idempotent).
+        if self.world().get_resource::<crate::dependency::DependencyGraph>().is_none() {
+            self.init_resource::<crate::dependency::DependencyGraph>();
+        }
+        if self.world().get_resource::<crate::dependency::CascadeQueue>().is_none() {
+            self.init_resource::<crate::dependency::CascadeQueue>();
+        }
+
         #[cfg(feature = "dev")]
         {
             self.add_systems(
@@ -312,6 +409,9 @@ impl ConfigHmrAppExt for App {
                     crate::binding::config_binding_cleanup_system::<A>,
                     crate::core::hmr_core_system::<A>,
                     crate::debounce::flush_debounced_refresh::<A>,
+                    crate::dependency::dependency_registry_system::<A>,
+                    crate::dependency::dependency_cleanup_system::<A>,
+                    crate::dependency::cascade_dispatch_system::<A>,
                 )
                     .chain(),
             )
@@ -353,8 +453,9 @@ impl ConfigHmrAppExt for App {
         // Per-type resources for entity binding tracking.
         self.init_resource::<AssetBindCache<A>>();
 
-        // Register the AssetChanged<A> message.
+        // Register the AssetChanged<A> + AssetRemoved<A> messages.
         self.add_message::<crate::watcher::AssetChanged<A>>();
+        self.add_message::<crate::watcher::AssetRemoved<A>>();
 
         // Systems: registry -> cleanup -> watcher, chained every frame.
         #[cfg(feature = "dev")]

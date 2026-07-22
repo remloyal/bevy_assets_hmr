@@ -124,6 +124,8 @@ pub fn flush_debounced_refresh<A: HmrSource>(
     mut refresh_evts: MessageWriter<ConfigRefresh<A::Config>>,
     mut removed_evts: MessageWriter<ConfigRemoved<A::Config>>,
     mut failed_evts: MessageWriter<ConfigReloadFailed<A::Config>>,
+    graph: Res<crate::dependency::DependencyGraph>,
+    mut cascade_queue: ResMut<crate::dependency::CascadeQueue>,
 ) {
     let any_pending = !debouncer.pending.is_empty();
     let any_removed = !debouncer.pending_removed.is_empty();
@@ -170,6 +172,17 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 source_path,
                 _marker: std::marker::PhantomData,
             });
+
+            // ---- Dependency cascade on removal: enqueue this asset's
+            // parents so they get re-dispatched on the next frame, so
+            // subscribers can clean up any state derived from the now-
+            // missing child. ----
+            let parents = graph.parents_of(id.untyped());
+            for (parent_untyped, parent_type) in parents {
+                cascade_queue
+                    .pending
+                    .push((parent_untyped, parent_type));
+            }
         }
     }
 
@@ -275,6 +288,15 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 diff_kind,
                 source_path: new_asset.source_path().to_string(),
             });
+
+            // ---- Dependency cascade: enqueue this asset's parents so they
+            // get re-dispatched on the next frame. ----
+            let parents = graph.parents_of(id.untyped());
+            for (parent_untyped, parent_type) in parents {
+                cascade_queue
+                    .pending
+                    .push((parent_untyped, parent_type));
+            }
 
             // 记录 flush 时间（cooldown 保护，防止写回死循环）
             debouncer.flushed_at.insert(id, Instant::now());

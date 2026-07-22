@@ -32,9 +32,11 @@ use std::hash::Hash;
 /// | 单对象 / 枚举（整体比较） | [`SimpleConfigDiff`] | **否** |
 /// | `Vec<Entry>` + `id: String` | [`impl_config_diff!`] 宏 | 否（宏生成） |
 /// | `Vec<Entry>` + `id: String` | `#[derive(ConfigDiff)]` | 否（derive 生成） |
-/// | 自定义 id 类型（`u32`/`Uuid`） | 手写 `impl ConfigDiff` | **是** |
+/// | `Vec<Entry>` + 非 String id（`u32`/`Uuid`） | `#[derive(ConfigDiff)]` + `id_type` | 否（derive 生成） |
+/// | `Vec<Entry>` + 非 String id（`u32`/`Uuid`） | [`impl_config_diff!`] 宏 + 类型参数 | 否（宏生成） |
+/// | 特殊 id 逻辑 | 手写 `impl ConfigDiff` | **是** |
 ///
-/// 只有需要**非 `String` 主键**时才需要手写 `type Id`。
+/// 只有需要**完全自定义 diff 逻辑**时才需要手写 `type Id`。
 pub trait ConfigDiff: Send + Sync + 'static {
     /// The logical id used to identify entries within this config.
     ///
@@ -148,29 +150,53 @@ impl<T: SimpleConfigDiff> ConfigDiff for T {
 /// }
 /// ```
 ///
+/// # Non-String id type
+///
+/// For databases whose entry id is not a `String` (e.g. `u32`, `Uuid`),
+/// pass the id type as a fourth argument:
+///
+/// ```no_run
+/// # use bevy::asset::Asset;
+/// # use bevy::reflect::TypePath;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+/// # struct MonsterDatabase {
+/// #     entries: Vec<MonsterEntry>,
+/// # }
+/// # #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+/// # struct MonsterEntry {
+/// #     id: u32,
+/// #     name: String,
+/// # }
+/// bevy_assets_hmr::impl_config_diff!(MonsterDatabase, entries, id, u32);
+/// ```
+///
 /// For non-Vec patterns (e.g. a single config object like `UiTheme`),
 /// implement [`ConfigDiff`] manually instead.
 #[macro_export]
 macro_rules! impl_config_diff {
-    ($db:ty, $field:ident, $id_field:ident) => {
+    // With explicit id type (non-String ids like u32, Uuid, etc.)
+    ($db:ty, $field:ident, $id_field:ident, $id_type:ty) => {
         impl $crate::ConfigDiff for $db {
-            type Id = String;
+            type Id = $id_type;
             fn diff(
                 old: &Self,
                 new: &Self,
             ) -> (
-                std::collections::HashSet<String>,
-                std::collections::HashSet<String>,
-                std::collections::HashSet<String>,
+                std::collections::HashSet<$id_type>,
+                std::collections::HashSet<$id_type>,
+                std::collections::HashSet<$id_type>,
             ) {
                 use std::collections::HashSet;
-                let old_ids: HashSet<String> =
+                let old_ids: HashSet<$id_type> =
                     old.$field.iter().map(|e| e.$id_field.clone()).collect();
-                let new_ids: HashSet<String> =
+                let new_ids: HashSet<$id_type> =
                     new.$field.iter().map(|e| e.$id_field.clone()).collect();
-                let added: HashSet<String> = new_ids.difference(&old_ids).cloned().collect();
-                let removed: HashSet<String> = old_ids.difference(&new_ids).cloned().collect();
-                let modified: HashSet<String> = old_ids
+                let added: HashSet<$id_type> =
+                    new_ids.difference(&old_ids).cloned().collect();
+                let removed: HashSet<$id_type> =
+                    old_ids.difference(&new_ids).cloned().collect();
+                let modified: HashSet<$id_type> = old_ids
                     .intersection(&new_ids)
                     .filter(|id| {
                         old.$field.iter().find(|e| &e.$id_field == *id)
@@ -181,5 +207,9 @@ macro_rules! impl_config_diff {
                 (added, removed, modified)
             }
         }
+    };
+    // Default: id type is String (backward compatible)
+    ($db:ty, $field:ident, $id_field:ident) => {
+        $crate::impl_config_diff!($db, $field, $id_field, String);
     };
 }

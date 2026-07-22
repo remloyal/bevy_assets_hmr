@@ -150,26 +150,19 @@ fn main() {
     // 3. 一行注册 HMR（直接模式，不经过 ConfigAsset 包装）
     app.register_asset::<LevelAsset>("levels/level_1.level");
 
-    // 4. 注入初始数据（直接 insert 到 Assets<LevelAsset>，不是 Assets<ConfigAsset<LevelAsset>>）
+    // 4. 注入初始数据（直接模式用 insert_asset 辅助方法，自动初始化快照）
     let level_id = AssetId::Uuid {
         uuid: Uuid::from_u128(999),
     };
-    let initial = LevelAsset {
-        id: "lv_1".into(),
-        name: "新手村".into(),
-        max_turns: 10,
-    };
-    {
-        let mut assets = app.world_mut().resource_mut::<Assets<LevelAsset>>();
-        let _ = assets.insert(level_id, initial.clone());
-    }
-    // 手动初始化快照（直接模式没有 insert_config 辅助方法）
-    {
-        let mut snapshots = app
-            .world_mut()
-            .resource_mut::<bevy_assets_hmr::LastSnapshot<LevelAsset>>();
-        snapshots.map.insert(level_id, initial);
-    }
+    app.insert_asset(
+        level_id,
+        LevelAsset {
+            id: "lv_1".into(),
+            name: "新手村".into(),
+            max_turns: 10,
+        },
+        "levels/level_1.level",
+    );
     app.insert_resource(LevelAssetId(level_id));
 
     // 5. 业务系统

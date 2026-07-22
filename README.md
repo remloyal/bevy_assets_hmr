@@ -274,8 +274,8 @@ fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
 | 类型 | 说明 |
 |---|---|
 | `ConfigHmrPlugin` | 主插件，`add_plugins` 一次。可配置 `debounce_window`（默认 150ms） |
-| `ConfigHmrAppExt` | App 扩展 trait，提供 `register_config` / `register_asset` / `insert_config` / `setup_hmr_headless` |
-| `ConfigDiff` | trait：`fn diff(old, new) -> (added, removed, modified)`。支持 `#[derive(ConfigDiff)]` |
+| `ConfigHmrAppExt` | App 扩展 trait，提供 `register_config` / `register_asset` / `insert_config` / `insert_asset` / `setup_hmr_headless` |
+| `ConfigDiff` | trait：`fn diff(old, new) -> (added, removed, modified)`。支持 `#[derive(ConfigDiff)]`（含 `id_type` 参数支持 `u32`/`Uuid` 等非 String 主键） |
 | `HmrSource` | trait：从 Asset 提取 Config（包装模式自动 impl，直接模式用户 impl） |
 | `ConfigAsset<T>` | 包装 Asset：`{ raw: T, source_path: String }`（仅包装模式） |
 | `ConfigRefresh<T>` | Message：`{ new_config: T, target_entities, changed_ids, diff_kind, source_path }` |
@@ -289,7 +289,8 @@ fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
 | `RefreshDebouncer<A>` | Resource：批处理窗口（默认 150ms） |
 | `AssetBind<A>` | Component：实体绑定到任意 `Asset`（无需 `ConfigDiff`） |
 | `AssetBindCache<A>` | Resource：`AssetId → {Entity}` 缓存，同 `HandleEntityCache` 但约束 `Asset` |
-| `AssetChanged<A>` | Message：任意 Asset 文件变更通知（无 diff，由 Bevy AssetServer 重载） |
+| `AssetChanged<A>` | Message：任意 Asset 文件变更通知（无 diff，由 Bevy AssetServer 重载）。`source_path` 从 `AssetBind` 的 handle path 自动填充 |
+| `AssetRemoved<A>` | Message：任意 Asset 被删除时派发，携带 `asset_id` + `target_entities` + `source_path` |
 
 ### App 扩展方法（`ConfigHmrAppExt`）
 
@@ -298,6 +299,7 @@ fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
 | `register_config::<T>(path)` | 包装 | 注册 ConfigLoader + 资源 + 系统 + 自动加载 + 持有 handle |
 | `register_asset::<A>(path)` | 直接 | 只注册资源 + 系统 + 自动加载 + 持有 handle（用户自己注册 loader） |
 | `insert_config::<T>(id, raw, path)` | 包装 | 直接注入数据（测试/headless 用） |
+| `insert_asset::<A>(id, asset, path)` | 直接 | 直接注入数据 + 初始化快照（测试/headless 用，消除手动样板） |
 | `watch_asset::<A>()` | 通用 | 注册实体追踪 + 变更通知，无 `ConfigDiff` 要求（用户自己 load） |
 | `setup_hmr_headless()` | 通用 | 配置 headless 环境（无渲染世界时启用 Messages 缓冲交换） |
 
@@ -331,6 +333,76 @@ fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
 5. **自动跳过空 diff**：diff 为空时不派发，订阅方不会收到无意义的刷新
 6. **自动 debounce**：短时间内的多次写入合并为一次刷新（窗口可配置）
 7. **自动缓存校验**：每 30 秒自动校验 `HandleEntityCache` 与实际组件的一致性
+8. **自动依赖图 + 级联**：构建跨类型 `Handle<*>` 依赖图，子资产变更自动派发 `ConfigRefresh` 给父资产订阅方（`changed_ids` 为空作为级联标记）
+
+## 依赖链级联（`DependencyGraph`）
+
+当一个父配置通过 `Handle<*>` 字段持有子配置的引用时，修改子配置会自动让父配置订阅方收到一个 `ConfigRefresh<T>`——这让"父配置缓存子配置派生数据"成为可能。
+
+### 工作机制
+
+1. **`#[derive(Asset)]`** 自动生成 `VisitAssetDependencies` impl，遍历所有标有 `#[dependency]` 的 `Handle<*>` 字段。
+2. **`dependency_registry_system<A>`**（注册在 `flush_debounced_refresh` 之后）每次 `AssetEvent<A>::Added/Modified` 时重建该资产在 `DependencyGraph` 中的边。
+3. **`flush_debounced_refresh<A>`**（修改后）在派发 `ConfigRefresh` 后，查询图找出此资产的所有父资产，推入 `CascadeQueue.pending`。
+4. **`cascade_dispatch_system<A>`**（每类型，链末尾）排空 `CascadeQueue` 中匹配当前类型的条目，为每个父资产派发 `ConfigRefresh<A::Config>`（**`changed_ids` 为空**作为级联标记）。
+
+### 订阅方语义
+
+```rust
+fn on_parent_refreshed(mut reader: MessageReader<ConfigRefresh<ParentDb>>) {
+    for refresh in reader.read() {
+        if refresh.changed_ids.is_empty() {
+            // 依赖级联：父资产本身未变，但有子资产被修改。
+            // 重新派生任何基于子资产计算的状态。
+            rederive_state_from_children(&refresh.new_config);
+        } else {
+            // 父资产本身变更（diff 有变化）。
+            apply_diff(&refresh.changed_ids, &refresh.new_config);
+        }
+    }
+}
+```
+
+### 使用示例
+
+```rust
+use bevy::prelude::*;
+use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, ConfigDiff, HmrSource};
+use bevy::asset::Asset;
+use bevy::reflect::TypePath;
+use serde::{Deserialize, Serialize};
+
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, PartialEq, Default, ConfigDiff)]
+#[config_diff(field = "entries", id = "id")]
+struct ItemDb {
+    entries: Vec<Item>,
+}
+
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, PartialEq, Default, ConfigDiff)]
+#[config_diff(field = "entries", id = "id")]
+struct NpcDatabase {
+    entries: Vec<NpcEntry>,
+    /// 这个 Handle 字段让 NpcDatabase 自动依赖 ItemDb。
+    /// 用 `#[dependency]` 标记后，修改 item.ron 会让 NpcDatabase
+    /// 订阅方收到 `changed_ids` 为空的 ConfigRefresh。
+    #[dependency]
+    item_table: Handle<ItemDb>,
+}
+
+app.add_plugins(ConfigHmrPlugin::default())
+    .register_config::<ItemDb>("data/items.ron")
+    .register_config::<NpcDatabase>("data/npcs.ron");
+```
+
+### API 概览
+
+| 符号 | 说明 |
+|---|---|
+| `DependencyGraph` | Resource：`UntypedAssetId -> Vec<(parent_untyped, parent TypeId)>` |
+| `CascadeQueue` | Resource：`Vec<(parent_untyped, parent_type)>` 待级联条目 |
+| `dependency_registry_system<A>` | 系统：从 `AssetEvent<A>::Added/Modified` 重建依赖边 |
+| `dependency_cleanup_system<A>` | 系统：从 `AssetEvent<A>::Removed` 清理边 |
+| `cascade_dispatch_system<A>` | 系统：派发级联 `ConfigRefresh<A::Config>`（下帧执行） |
 
 ## 通用 Asset 文件监听（`watch_asset`）
 
@@ -339,7 +411,10 @@ fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
 Bevy 的 `AssetServer`（启用 `bevy/file_watcher` 时）已自动处理文件的磁盘监听、重载和 GPU 上传。`watch_asset` 在此基础上附加：
 
 1. **实体绑定追踪**：`AssetBind<A>` 组件 + `AssetBindCache<A>` 缓存
-2. **变更通知事件**：`AssetChanged<A>` Message（携带 `asset_id`、`new_asset`、`target_entities`）
+2. **变更通知事件**：`AssetChanged<A>` Message（携带 `asset_id`、`new_asset`、`target_entities`、`source_path`）
+3. **删除通知事件**：`AssetRemoved<A>` Message（资产被删除时派发，携带 `asset_id`、`target_entities`、`source_path`）
+
+> `source_path` 从 `AssetBind<A>` 注册时记录的 `Handle::path()` 自动填充。若 handle 无路径（如直接 `Assets::insert`），则为空字符串。
 
 ### 使用示例
 
