@@ -1,0 +1,7 @@
+(
+    npcs: [
+        (id: "npc_1", name: "商人", hp: 100),
+        (id: "npc_2", name: "守卫", hp: 150),
+        (id: "npc_3", name: "法师", hp: 80),
+    ],
+)

@@ -31,7 +31,7 @@ mod core;
 mod debounce;
 mod dependency;
 mod diff;
-mod ext;
+pub mod ext;
 mod loader;
 mod refresh;
 mod registry;
@@ -49,6 +49,7 @@ pub use dependency::{
 };
 pub use diff::{ConfigDiff, SimpleConfigDiff};
 pub use ext::ConfigHmrAppExt;
+pub use ext::{HmrAutoWatch, HmrAutoWatchPlugin, adopt_handle, take_over_handle};
 pub use loader::ConfigLoader;
 pub use refresh::{ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind};
 pub use registry::ConfigPathRegistry;
@@ -61,6 +62,9 @@ pub use watcher::{
 // 获得 trait 和 `#[derive(ConfigDiff)]` 能力（Rust 允许 derive macro 和
 // trait 同名，类似 bevy 的 `Component`）。
 pub use bevy_assets_hmr_derive::ConfigDiff;
+
+// Re-export HmrAutoWatch derive macro（同名 trait + derive，类似 ConfigDiff）。
+pub use bevy_assets_hmr_derive::HmrAutoWatch;
 
 use bevy::prelude::*;
 use std::time::Duration;

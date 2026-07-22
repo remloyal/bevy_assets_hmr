@@ -30,21 +30,13 @@ ron = "0.12.2"
 thiserror = "2.0"
 
 [dev-dependencies]
-bevy = { version = "0.19.0", default-features = false, features = [
-    "bevy_asset",
-    "bevy_log",
-    "bevy_image",
-    "bevy_color",
-    "bevy_text",
-    "bevy_scene",
-    "bevy_state",
-    "bevy_ui",
-    "bevy_ui_render",
-    "bevy_ui_widgets",
-    "async-io",
-] }
+# Dev 示例含窗口 (basic_viewer) 使用 DefaultPlugins，需要 bevy 默认完整 feature 集
+# 同时显式启用 `bevy/file_watcher`：修改 assets/ 下文件后 AssetServer 才能触发 AssetEvent::Modified，
+# 进而驱动 HMR 框架的 diff + ConfigRefresh 派发。bevy 0.19 的 default features 不含 file_watcher。
+bevy = { version = "0.19.0", default-features = true, features = ["file_watcher"] }
 bevy_assets_hmr = { path = "." }
 bevy_asset_macros = "0.19.0"
+bevy_asset_loader = { version = "0.27", features = ["2d"] }
 uuid = "1"
 
 # 临时验证 example：bsn! + AssetBind<Image> 是否可编译
@@ -56,6 +48,26 @@ path = "examples/bsn_asset_bind.rs"
 [[example]]
 name = "dependency_cascade"
 path = "examples/dependency_cascade.rs"
+
+# bevy_asset_loader 兼容示例：HmrAutoWatch derive
+[[example]]
+name = "asset_loader_compat"
+path = "examples/asset_loader_compat.rs"
+
+# 窗口版查看器：bevy UI 显示配置内容 + HMR 刷新提示
+[[example]]
+name = "basic_viewer"
+path = "examples/basic_viewer.rs"
+
+# 控制台查看器：格式化打印配置内容 + 修改提示
+[[example]]
+name = "viewer"
+path = "examples/viewer.rs"
+
+# bevy_asset_loader 窗口版：LoadingState 加载 + HmrAutoWatch 自动接管 + HMR 实时刷新 UI
+[[example]]
+name = "asset_loader_viewer"
+path = "examples/asset_loader_viewer.rs"
 
 # HMR 文件监听由消费方启用 `bevy/file_watcher` feature 实现（bevy 0.19
 # 依赖 notify-debouncer-full ^0.7.0，现已可用）。本 crate 只负责

@@ -231,7 +231,7 @@ pub trait ConfigHmrAppExt {
     /// use bevy::prelude::*;
     /// use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, AssetBind};
     /// let mut app = App::new();
-    /// app.add_plugins(DefaultPlugins); // enables bevy/file_watcher
+    /// app.add_plugins(DefaultPlugins); // 需在 Cargo.toml 显式启用 `bevy/file_watcher` feature
     /// app.add_plugins(ConfigHmrPlugin::default());
     /// app.watch_asset::<Image>();
     /// // Then, wherever you load:
@@ -244,80 +244,7 @@ pub trait ConfigHmrAppExt {
 
 impl ConfigHmrAppExt for App {
     fn register_config<T: HmrAsset>(&mut self, path: &str) -> &mut Self {
-        // Pull the global debounce window from HmrSettings (set by
-        // ConfigHmrPlugin::build). Fall back to 150ms if the plugin wasn't
-        // added - this shouldn't happen in normal usage but keeps the
-        // method robust.
-        let debounce_window = self
-            .world()
-            .get_resource::<HmrSettings>()
-            .map(|s| s.debounce_window)
-            .unwrap_or_else(|| Duration::from_millis(150));
-
-        // 包装模式：系统泛型用 `ConfigAsset<T>`（它自动 impl `HmrSource`），
-        // `ConfigAsset<T>::Config = T`，所以 `ConfigRefresh<T>` 的泛型仍是 `T`。
-        self.register_asset_loader(ConfigLoader::<T>::default())
-            .init_asset::<ConfigAsset<T>>()
-            .init_asset::<T>()
-            .init_resource::<HandleEntityCache<ConfigAsset<T>>>()
-            .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
-            .init_resource::<LastSnapshot<ConfigAsset<T>>>()
-            .add_message::<ConfigRefresh<T>>()
-            .add_message::<ConfigRemoved<T>>()
-            .add_message::<ConfigReloadFailed<T>>();
-
-        // Init shared dependency resources (idempotent: skip if already
-        // added by an earlier register_config/register_asset call).
-        if self.world().get_resource::<crate::dependency::DependencyGraph>().is_none() {
-            self.init_resource::<crate::dependency::DependencyGraph>();
-        }
-        if self.world().get_resource::<crate::dependency::CascadeQueue>().is_none() {
-            self.init_resource::<crate::dependency::CascadeQueue>();
-        }
-
-        #[cfg(feature = "dev")]
-        {
-            self.add_systems(
-                Update,
-                (
-                    crate::binding::config_binding_registry_system::<ConfigAsset<T>>,
-                    crate::binding::config_binding_cleanup_system::<ConfigAsset<T>>,
-                    crate::core::hmr_core_system::<ConfigAsset<T>>,
-                    crate::debounce::flush_debounced_refresh::<ConfigAsset<T>>,
-                    crate::dependency::dependency_registry_system::<ConfigAsset<T>>,
-                    crate::dependency::dependency_cleanup_system::<ConfigAsset<T>>,
-                    crate::dependency::cascade_dispatch_system::<ConfigAsset<T>>,
-                )
-                    .chain(),
-            )
-            .add_systems(
-                Update,
-                crate::core::cache_validation_system::<ConfigAsset<T>>.run_if(
-                    bevy::time::common_conditions::on_timer(Duration::from_secs(30)),
-                ),
-            );
-        }
-
-        // Apply the global debounce window to this type's debouncer.
-        self.world_mut()
-            .resource_mut::<RefreshDebouncer<ConfigAsset<T>>>()
-            .window = debounce_window;
-
-        // Record path in the registry, keyed by `ConfigAsset<T>::type_path()`
-        // so `load_config_at_startup::<ConfigAsset<T>>` can look it up.
-        self.world_mut()
-            .resource_mut::<ConfigPathRegistry>()
-            .paths
-            .insert(ConfigAsset::<T>::type_path().to_string(), path.to_string());
-
-        // 记录 path 在 ConfigPathRegistry 里，Startup 系统会读取它来 load。
-        // 用一个泛型 Startup 系统避免闭包 + 泛型 + move 的类型推断问题。
-        // 包装模式下 `A = ConfigAsset<T>`。
-        self.add_systems(
-            Startup,
-            crate::ext::load_config_at_startup::<ConfigAsset<T>>,
-        );
-
+        register_config_impl::<T>(self, path, true);
         self
     }
 
@@ -368,72 +295,14 @@ impl ConfigHmrAppExt for App {
             let mut snapshots = self.world_mut().resource_mut::<LastSnapshot<A>>();
             snapshots.map.insert(id, asset);
             if !source_path.is_empty() {
-                snapshots
-                    .source_paths
-                    .insert(id, source_path.to_string());
+                snapshots.source_paths.insert(id, source_path.to_string());
             }
         }
         self
     }
 
     fn register_asset<A: HmrSource>(&mut self, path: &str) -> &mut Self {
-        let debounce_window = self
-            .world()
-            .get_resource::<HmrSettings>()
-            .map(|s| s.debounce_window)
-            .unwrap_or_else(|| Duration::from_millis(150));
-
-        // 直接模式：不注册 ConfigLoader，不 init_asset（用户自己做）。
-        // 系统泛型直接用 A（用户 Asset 本身，A::Config = A）。
-        self.init_resource::<HandleEntityCache<A>>()
-            .init_resource::<RefreshDebouncer<A>>()
-            .init_resource::<LastSnapshot<A>>()
-            .add_message::<ConfigRefresh<A::Config>>()
-            .add_message::<ConfigRemoved<A::Config>>()
-            .add_message::<ConfigReloadFailed<A::Config>>();
-
-        // Init shared dependency resources (idempotent).
-        if self.world().get_resource::<crate::dependency::DependencyGraph>().is_none() {
-            self.init_resource::<crate::dependency::DependencyGraph>();
-        }
-        if self.world().get_resource::<crate::dependency::CascadeQueue>().is_none() {
-            self.init_resource::<crate::dependency::CascadeQueue>();
-        }
-
-        #[cfg(feature = "dev")]
-        {
-            self.add_systems(
-                Update,
-                (
-                    crate::binding::config_binding_registry_system::<A>,
-                    crate::binding::config_binding_cleanup_system::<A>,
-                    crate::core::hmr_core_system::<A>,
-                    crate::debounce::flush_debounced_refresh::<A>,
-                    crate::dependency::dependency_registry_system::<A>,
-                    crate::dependency::dependency_cleanup_system::<A>,
-                    crate::dependency::cascade_dispatch_system::<A>,
-                )
-                    .chain(),
-            )
-            .add_systems(
-                Update,
-                crate::core::cache_validation_system::<A>.run_if(
-                    bevy::time::common_conditions::on_timer(Duration::from_secs(30)),
-                ),
-            );
-        }
-
-        self.world_mut()
-            .resource_mut::<RefreshDebouncer<A>>()
-            .window = debounce_window;
-
-        self.world_mut()
-            .resource_mut::<ConfigPathRegistry>()
-            .paths
-            .insert(A::type_path().to_string(), path.to_string());
-
-        self.add_systems(Startup, crate::ext::load_config_at_startup::<A>);
-
+        register_asset_impl::<A>(self, path, true);
         self
     }
 
@@ -445,10 +314,7 @@ impl ConfigHmrAppExt for App {
     }
 
     fn watch_asset<A: Asset + Clone + Send + Sync + 'static>(&mut self) -> &mut Self {
-        use crate::watcher::{
-            AssetBindCache, asset_bind_cleanup_system, asset_bind_registry_system,
-            asset_watcher_system,
-        };
+        use crate::watcher::AssetBindCache;
 
         // Per-type resources for entity binding tracking.
         self.init_resource::<AssetBindCache<A>>();
@@ -460,6 +326,10 @@ impl ConfigHmrAppExt for App {
         // Systems: registry -> cleanup -> watcher, chained every frame.
         #[cfg(feature = "dev")]
         {
+            use crate::watcher::{
+                asset_bind_cleanup_system, asset_bind_registry_system, asset_watcher_system,
+            };
+
             self.add_systems(
                 Update,
                 (
@@ -486,19 +356,280 @@ impl ConfigHmrAppExt for App {
 pub fn load_config_at_startup<A: HmrSource>(
     asset_server: Res<bevy::asset::AssetServer>,
     registry: Res<ConfigPathRegistry>,
-    mut commands: Commands,
+    commands: Commands,
+    existing: Option<Res<ConfigHandle<A>>>,
 ) {
+    // 如果 `ConfigHandle<A>` 已存在（由 `take_over_handle` 提前插入），
+    // 跳过自动加载——`bevy_asset_loader` 已经加载了文件并持有 handle。
+    if existing.is_some() {
+        bevy::log::debug!(
+            "[HMR] {} already has a ConfigHandle (take_over_handle?), skipping auto-load",
+            A::type_path()
+        );
+        return;
+    }
     let path = registry.paths.get(A::type_path()).cloned();
-    if let Some(path) = path {
-        let handle = asset_server.load::<A>(&path);
-        commands.insert_resource(ConfigHandle::<A> { _handle: handle });
-        // tracing 宏在无 subscriber 时为空操作，不会 panic；无 LogPlugin
-        // 的测试环境也不会触发 IoTaskPool 依赖（bevy 0.19 已解耦）。
-        bevy::log::info!("[HMR] registered config: {} -> {}", A::type_path(), path);
-    } else {
+    let Some(path) = path else {
         bevy::log::warn!(
             "[HMR] no path registered for {} (register_config not called?)",
             A::type_path()
         );
+        return;
+    };
+    let mut commands = commands;
+    let handle = asset_server.load::<A>(&path);
+    commands.insert_resource(ConfigHandle::<A> { _handle: handle });
+    // tracing 宏在无 subscriber 时为空操作，不会 panic；无 LogPlugin
+    // 的测试环境也不会触发 IoTaskPool 依赖（bevy 0.19 已解耦）。
+    bevy::log::info!("[HMR] registered config: {} -> {}", A::type_path(), path);
+}
+
+// ===========================================================================
+// 公共 helper：注册逻辑（供 ConfigHmrAppExt 和 HmrAutoWatchPlugin 共用）
+// ===========================================================================
+
+/// 包装模式注册核心逻辑。`autoload = true` 时注册 Startup 加载系统；
+/// `autoload = false` 时不注册（由 `take_over_handle` 已持有 handle）。
+///
+/// 设为 `pub` 是因为 `#[derive(HmrAutoWatch)]` 宏需要跨 crate 调用它。
+pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bool) {
+    let debounce_window = app
+        .world()
+        .get_resource::<HmrSettings>()
+        .map(|s| s.debounce_window)
+        .unwrap_or_else(|| Duration::from_millis(150));
+
+    app.register_asset_loader(ConfigLoader::<T>::default())
+        .init_asset::<ConfigAsset<T>>()
+        .init_asset::<T>()
+        .init_resource::<HandleEntityCache<ConfigAsset<T>>>()
+        .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
+        .init_resource::<LastSnapshot<ConfigAsset<T>>>()
+        .add_message::<ConfigRefresh<T>>()
+        .add_message::<ConfigRemoved<T>>()
+        .add_message::<ConfigReloadFailed<T>>();
+
+    init_shared_dependency_resources(app);
+
+    #[cfg(feature = "dev")]
+    {
+        app.add_systems(
+            Update,
+            (
+                crate::binding::config_binding_registry_system::<ConfigAsset<T>>,
+                crate::binding::config_binding_cleanup_system::<ConfigAsset<T>>,
+                crate::core::hmr_core_system::<ConfigAsset<T>>,
+                crate::debounce::flush_debounced_refresh::<ConfigAsset<T>>,
+                crate::dependency::dependency_registry_system::<ConfigAsset<T>>,
+                crate::dependency::dependency_cleanup_system::<ConfigAsset<T>>,
+                crate::dependency::cascade_dispatch_system::<ConfigAsset<T>>,
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            crate::core::cache_validation_system::<ConfigAsset<T>>.run_if(
+                bevy::time::common_conditions::on_timer(Duration::from_secs(30)),
+            ),
+        );
+    }
+
+    app.world_mut()
+        .resource_mut::<RefreshDebouncer<ConfigAsset<T>>>()
+        .window = debounce_window;
+
+    app.world_mut()
+        .resource_mut::<ConfigPathRegistry>()
+        .paths
+        .insert(ConfigAsset::<T>::type_path().to_string(), path.to_string());
+
+    if autoload {
+        app.add_systems(Startup, load_config_at_startup::<ConfigAsset<T>>);
+    }
+}
+
+/// 直接模式注册核心逻辑。`autoload` 语义同 [`register_config_impl`]。
+///
+/// 设为 `pub` 是因为 `#[derive(HmrAutoWatch)]` 宏需要跨 crate 调用它。
+pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bool) {
+    let debounce_window = app
+        .world()
+        .get_resource::<HmrSettings>()
+        .map(|s| s.debounce_window)
+        .unwrap_or_else(|| Duration::from_millis(150));
+
+    app.init_resource::<HandleEntityCache<A>>()
+        .init_resource::<RefreshDebouncer<A>>()
+        .init_resource::<LastSnapshot<A>>()
+        .add_message::<ConfigRefresh<A::Config>>()
+        .add_message::<ConfigRemoved<A::Config>>()
+        .add_message::<ConfigReloadFailed<A::Config>>();
+
+    init_shared_dependency_resources(app);
+
+    #[cfg(feature = "dev")]
+    {
+        app.add_systems(
+            Update,
+            (
+                crate::binding::config_binding_registry_system::<A>,
+                crate::binding::config_binding_cleanup_system::<A>,
+                crate::core::hmr_core_system::<A>,
+                crate::debounce::flush_debounced_refresh::<A>,
+                crate::dependency::dependency_registry_system::<A>,
+                crate::dependency::dependency_cleanup_system::<A>,
+                crate::dependency::cascade_dispatch_system::<A>,
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            crate::core::cache_validation_system::<A>.run_if(
+                bevy::time::common_conditions::on_timer(Duration::from_secs(30)),
+            ),
+        );
+    }
+
+    app.world_mut().resource_mut::<RefreshDebouncer<A>>().window = debounce_window;
+
+    app.world_mut()
+        .resource_mut::<ConfigPathRegistry>()
+        .paths
+        .insert(A::type_path().to_string(), path.to_string());
+
+    if autoload {
+        app.add_systems(Startup, load_config_at_startup::<A>);
+    }
+}
+
+/// 初始化共享依赖资源（幂等：已存在则跳过）。
+fn init_shared_dependency_resources(app: &mut App) {
+    if app
+        .world()
+        .get_resource::<crate::dependency::DependencyGraph>()
+        .is_none()
+    {
+        app.init_resource::<crate::dependency::DependencyGraph>();
+    }
+    if app
+        .world()
+        .get_resource::<crate::dependency::CascadeQueue>()
+        .is_none()
+    {
+        app.init_resource::<crate::dependency::CascadeQueue>();
+    }
+}
+
+/// 接管一个已加载的 `Handle<A>`，将其接入 HMR 框架。
+///
+/// 用于 `bevy_asset_loader` 兼容场景：`LoadingState` 已经把文件加载完并把
+/// handle 放进了 `Resource`（`AssetCollection`），本函数在加载完成的状态
+/// 切入时调用，复用现有 HMR 注册逻辑（注册系统、消息、快照等），但**不**
+/// 重复 `asset_server.load`——而是直接持有传入的 handle 并预热快照。
+///
+/// - 调用 `register_asset_impl::<A>(app, path, autoload=false)` 注册 HMR 系统。
+/// - 用传入的 handle 创建 `ConfigHandle<A>` Resource（持有强引用防回收）。
+/// - **预热 `LastSnapshot<A>`**：从 `Assets<A>` 取当前值塞进快照，保证首次
+///   `AssetEvent::Added` 不派发伪刷新。
+pub fn take_over_handle<A: HmrSource>(app: &mut App, handle: Handle<A>, source_path: &str) {
+    register_asset_impl::<A>(app, source_path, false);
+
+    let id = handle.id();
+
+    // 持有强引用
+    app.insert_resource(ConfigHandle::<A> { _handle: handle });
+
+    // 预热快照：若资产已加载则立即记录，避免首次 Added 派发伪刷新。
+    if let Some(asset) = app
+        .world()
+        .get_resource::<Assets<A>>()
+        .and_then(|assets| assets.get(id))
+    {
+        let config = asset.config().clone();
+        let mut snapshots = app.world_mut().resource_mut::<LastSnapshot<A>>();
+        snapshots.map.insert(id, config);
+        if !source_path.is_empty() {
+            snapshots.source_paths.insert(id, source_path.to_string());
+        }
+    }
+
+    bevy::log::info!(
+        "[HMR] take_over_handle: {} -> {}",
+        A::type_path(),
+        source_path
+    );
+}
+
+/// 在 `&mut World` 上接管一个已加载的 `Handle<A>`（持有 + 预热快照）。
+///
+/// 这是 [`take_over_handle`] 的 "world 级别" 版本，用于 exclusive system
+///（`fn(&mut World)`）内部调用。它**不**注册 HMR 框架系统（那些应在
+/// `Plugin::build` 阶段通过 `register_asset_impl` 完成注册），只做：
+///
+/// - 用传入的 handle 创建 `ConfigHandle<A>` Resource（持有强引用防回收）。
+/// - 预热 `LastSnapshot<A>`：从 `Assets<A>` 取当前值塞进快照。
+pub fn adopt_handle<A: HmrSource>(
+    world: &mut bevy::ecs::world::World,
+    handle: Handle<A>,
+    source_path: &str,
+) {
+    let id = handle.id();
+
+    // 持有强引用
+    world.insert_resource(ConfigHandle::<A> { _handle: handle });
+
+    // 预热快照：若资产已加载则立即记录，避免首次 Added 派发伪刷新。
+    if let Some(asset) = world
+        .get_resource::<Assets<A>>()
+        .and_then(|assets| assets.get(id))
+    {
+        let config = asset.config().clone();
+        let mut snapshots = world.resource_mut::<LastSnapshot<A>>();
+        snapshots.map.insert(id, config);
+        if !source_path.is_empty() {
+            snapshots.source_paths.insert(id, source_path.to_string());
+        }
+    }
+
+    bevy::log::info!("[HMR] adopt_handle: {} -> {}", A::type_path(), source_path);
+}
+
+// ===========================================================================
+// HmrAutoWatch: bevy_asset_loader 兼容层
+// ===========================================================================
+
+use bevy::app::Plugin;
+
+/// 由 `#[derive(HmrAutoWatch)]` 实现的 trait。
+///
+/// 用户通常不直接调用这些方法——derive 宏生成 `hmr_plugin(state)` 方法返回
+/// 一个 [`HmrAutoWatchPlugin`]，用户只需 `app.add_plugins(MyAssets::hmr_plugin(GameState::Ready))`。
+/// 带静态 `#[asset(path = "...")]` 的 `Handle<ConfigAsset<T>>` 会自动接入；
+/// 直接模式的 `Handle<A: HmrSource>` 需要在字段上显式增加 `#[hmr_watch]`。
+///
+/// 该 trait 本身的作用是为宏提供一个"标记"类型，使 derive 宏可以附加到
+/// 任何实现了 `Resource` 的结构体上。实际的安装逻辑全部由宏生成的
+/// `hmr_plugin` 方法内联展开，不依赖 trait 方法。
+pub trait HmrAutoWatch: Resource {}
+
+/// 由 `#[derive(HmrAutoWatch)]` 生成的 `hmr_plugin(state)` 返回的 Plugin。
+///
+/// 内部持有一个闭包，闭包在 `Plugin::build` 时调用
+/// `app.add_systems(OnEnter(state), install_system)`，其中 `install_system`
+/// 从 `Res<C>` 取出每个字段的 handle 并调用 [`take_over_handle`]。
+pub struct HmrAutoWatchPlugin {
+    installer: Box<dyn Fn(&mut App) + Send + Sync + 'static>,
+}
+
+impl HmrAutoWatchPlugin {
+    /// 构造一个 Plugin，`installer` 闭包在 `build` 时被调用。
+    pub fn new(installer: Box<dyn Fn(&mut App) + Send + Sync + 'static>) -> Self {
+        Self { installer }
+    }
+}
+
+impl Plugin for HmrAutoWatchPlugin {
+    fn build(&self, app: &mut App) {
+        (self.installer)(app);
     }
 }

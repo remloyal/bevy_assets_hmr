@@ -1,4 +1,4 @@
-﻿//! File-level hot-reload for **any** Bevy `Asset` type (images, 3D models,
+//! File-level hot-reload for **any** Bevy `Asset` type (images, 3D models,
 //! audio, scenes, fonts, …) — no `ConfigDiff` required.
 //!
 //! Unlike [`crate::register_config`] / [`crate::register_asset`], which
@@ -19,7 +19,7 @@
 //! # Example
 //!
 //! ```ignore
-//! app.add_plugins(DefaultPlugins) // enables bevy/file_watcher
+//! app.add_plugins(DefaultPlugins) // 需在 Cargo.toml 显式启用 `bevy/file_watcher` feature
 //!     .add_plugins(ConfigHmrPlugin::default())
 //!     .watch_asset::<Image>("textures/player.png")
 //!     .watch_asset::<Scene>("models/character.gltf#Scene0");
@@ -338,7 +338,9 @@ pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
         match evt {
             AssetEvent::Added { id } | AssetEvent::Modified { id } => {
                 let id = *id;
-                let Some(asset) = assets.get(id) else { continue };
+                let Some(asset) = assets.get(id) else {
+                    continue;
+                };
                 let target_entities: Vec<Entity> = cache
                     .get_entities(&id)
                     .map(|s| s.iter().copied().collect())
@@ -353,7 +355,9 @@ pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
                 });
                 bevy::log::info!(
                     "[HMR] AssetChanged<{}> asset_id={:?}，关联实体数={}",
-                    std::any::type_name::<A>(), id, target_count,
+                    std::any::type_name::<A>(),
+                    id,
+                    target_count,
                 );
             }
             AssetEvent::Removed { id } => {
@@ -372,7 +376,9 @@ pub fn asset_watcher_system<A: Asset + Clone + Send + Sync + 'static>(
                 });
                 bevy::log::info!(
                     "[HMR] AssetRemoved<{}> asset_id={:?}，关联实体数={}",
-                    std::any::type_name::<A>(), id, target_count,
+                    std::any::type_name::<A>(),
+                    id,
+                    target_count,
                 );
             }
             _ => {}

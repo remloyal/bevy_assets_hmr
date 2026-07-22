@@ -269,6 +269,97 @@ fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
 }
 ```
 
+## 兼容 `bevy_asset_loader`
+
+如果你已经在用 [`bevy_asset_loader`](https://crates.io/crates/bevy_asset_loader)
+的 `AssetCollection` + `LoadingState` 流程，在集合上增加
+`#[derive(HmrAutoWatch)]`，再安装宏生成的 `hmr_plugin(state)`，就能在加载
+完成后接入 HMR 框架，无需手写 `register_config` / `register_asset`。
+
+### 用法
+
+```rust
+use bevy::prelude::*;
+use bevy_asset_loader::prelude::*;
+use bevy_assets_hmr::{
+    ConfigAsset, ConfigHmrPlugin, ConfigRefresh, HmrAutoWatch, SimpleConfigDiff,
+};
+
+#[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+enum GameState {
+    #[default]
+    Loading,
+    Ready,
+}
+
+#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+struct MyConfig { title: String, max_players: u32 }
+impl SimpleConfigDiff for MyConfig {}
+
+// AssetCollection + HmrAutoWatch 双 derive
+#[derive(AssetCollection, Resource, HmrAutoWatch)]
+struct GameAssets {
+    #[asset(path = "data/config.ron")]
+    cfg: Handle<ConfigAsset<MyConfig>>,  // 自动接入 HMR
+}
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_plugins(ConfigHmrPlugin::default())
+        .init_state::<GameState>()
+        .add_loading_state(
+            LoadingState::new(GameState::Loading)
+                .continue_to_state(GameState::Ready)
+                .load_collection::<GameAssets>(),
+        )
+        // 一行接入 HMR：进入 Ready 状态时接管所有 Handle<A: HmrSource> 字段
+        .add_plugins(GameAssets::hmr_plugin(GameState::Ready))
+        .add_systems(Update, my_subscriber.run_if(in_state(GameState::Ready)))
+        .run();
+}
+```
+
+`ConfigAsset<T>` 是推荐的包装模式：框架提供 loader 和 `HmrSource` 实现，
+所以不需要字段标记。已有自定义 Asset/loader 时可以使用直接模式：
+
+```rust
+#[derive(Asset, TypePath, Clone, PartialEq)]
+pub struct SkillConfig { /* ... */ }
+
+// SkillConfig 还需要实现 ConfigDiff 和 HmrSource，应用需要注册自己的 AssetLoader。
+
+#[derive(AssetCollection, Resource, HmrAutoWatch)]
+pub struct GameAssets {
+    #[asset(path = "configs/skill.ron")]
+    #[hmr_watch]
+    pub skill_config: Handle<SkillConfig>,
+
+    // 普通 Bevy 资产不标记，会被 HmrAutoWatch 跳过。
+    #[asset(path = "textures/icon.png")]
+    pub icon: Handle<Image>,
+}
+```
+
+`#[hmr_watch]` 是 `HmrAutoWatch` derive 的 helper 属性，不能脱离
+`#[derive(HmrAutoWatch)]` 单独使用。
+
+### 规则
+
+- **包装模式自动接入**：带静态 `#[asset(path = "...")]` 的
+  `Handle<ConfigAsset<T>>` 默认接入 HMR。
+- **直接模式显式接入**：`Handle<A: HmrSource>` 必须增加 `#[hmr_watch]`；
+  `A` 的 Asset 和 loader 仍由应用注册。
+- **跳过字段**：用 `#[hmr(skip)]` 跳过原本会自动接入的 `ConfigAsset<T>`。
+- **普通资产**：未标记的 `Handle<Image>` 等普通 Bevy 资产自动跳过。
+- **静态路径**：HMR 字段必须使用 `#[asset(path = "...")]`；dynamic asset
+  key 目前不支持，因为宏无法在构建插件时确定源路径。
+- **状态选择**：`hmr_plugin(state)` 的 `state` 应为 `LoadingState` 的
+  `continue_to_state` 目标状态（如 `GameState::Ready`），表示资产已加载完毕。
+- **无额外依赖**：`HmrAutoWatch` 宏和 `HmrAutoWatchPlugin` 只依赖 bevy 的
+  `States`，不依赖 `bevy_asset_loader` crate 本身--用户需自行添加
+  `bevy_asset_loader` 依赖并 `#[derive(AssetCollection)]`。
+
 ## API 概览
 
 | 类型 | 说明 |
@@ -286,6 +377,9 @@ fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
 | `ConfigHandle<A>` | Resource：持有强引用 handle 防止资产被回收 |
 | `HandleEntityCache<A>` | Resource：handle ↔ entity 双向缓存，自动维护 |
 | `LastSnapshot<A>` | Resource：每个 asset id 的上一版快照，自动初始化 |
+| `HmrAutoWatch` | trait + derive：自动接入 `Handle<ConfigAsset<T>>`，并通过 `#[hmr_watch]` 接入直接模式的 `Handle<A: HmrSource>` |
+| `HmrAutoWatchPlugin` | 由 `HmrAutoWatch` derive 生成的 `hmr_plugin(state)` 返回的 Plugin |
+| `take_over_handle` | 手动接管已加载的 handle 接入 HMR（宏内部使用） |
 | `RefreshDebouncer<A>` | Resource：批处理窗口（默认 150ms） |
 | `AssetBind<A>` | Component：实体绑定到任意 `Asset`（无需 `ConfigDiff`） |
 | `AssetBindCache<A>` | Resource：`AssetId → {Entity}` 缓存，同 `HandleEntityCache` 但约束 `Asset` |
@@ -510,6 +604,15 @@ cargo run --example direct_mode -p bevy_assets_hmr
 
 # bsn! 内联 AssetBind：验证 AssetBind<Image> 能直接在 bsn! 宏中作为组件使用
 cargo run --example bsn_asset_bind -p bevy_assets_hmr
+
+# 窗口版查看器：打开 bevy 窗口，UI 显示配置内容 + 提示（需要 bevy_render + bevy_winit features）
+cargo run --example basic_viewer -p bevy_assets_hmr
+
+# 控制台查看器：格式化打印配置内容 + 修改提示
+cargo run --example viewer -p bevy_assets_hmr
+
+# bevy_asset_loader 窗口版查看器：LoadingState 加载 + HMR 实时刷新
+cargo run --example asset_loader_viewer -p bevy_assets_hmr
 ```
 
 ### `basic.rs` - 包装模式最简流程
@@ -575,6 +678,56 @@ commands.spawn_scene(bsn! {
 
 > **前提**:App 构建时需调用 `app.watch_asset::<Image>()` 注册 `AssetBindCache<Image>` 与追踪系统。运行前需要 `assets/textures/bg.jpg`(已随仓库附带)。
 
+### `basic_viewer.rs` - 窗口版查看器（`DefaultPlugins`）
+
+打开一个真实 bevy 窗口，在 UI 中显示示例 NPC 配置内容，并提示"修改文件后可重新运行查看更新"。演示了 `MinimalPlugins + WindowPlugin + WinitPlugin` 组合下的窗口 + UI 文本渲染。不含 HMR 消息系统（窗口环境下消息初始化有 GPU 驱动依赖差异）。
+
+```rust
+app.add_plugins(DefaultPlugins);  // 开窗口
+app.add_systems(Startup, setup_ui);  // UI 渲染
+```
+
+> **前提**：需要 `bevy_render` + `bevy_winit` dev-dependencies。
+
+### `viewer.rs` - 控制台查看器
+
+启动后格式化打印当前配置内容，并提示修改 RON 文件后可重新运行查看更新。基于 `basic.rs` 的 headless HMR 流程，是日常开发最常用的查看方式。
+
+```rust
+app.register_config::<NpcDatabase>("data/npc.ron");  // 自动加载
+// 启动系统直接读取 Assets 打印
+// 修改文件后重新运行即可看到更新
+```
+
+运行输出示例：
+```
+╔══════════════════════════════════════╗
+║  📦 bevy_assets_hmr 配置查看器     ║
+║  共 3 条 NPC 数据：                ║
+║    npc_1 — 商人 (HP: 100)          ║
+║    npc_2 — 守卫 (HP: 150)          ║
+║    npc_3 — 法师 (HP: 80)            ║
+║  💡 修改 assets/data/npc.ron 后     ║
+║  重新运行即可看到更新内容。          ║
+╚══════════════════════════════════════╝
+```
+
+### `asset_loader_viewer.rs` - `bevy_asset_loader` 窗口版（GUI 完整流程）
+
+用 `LoadingState` 加载 `ConfigAsset<MyConfig>`，进入 `GameState::Ready` 后由 `GameAssets::hmr_plugin(GameState::Ready)` 把 handle 自动接入 HMR，UI 显示配置内容，修改 `assets/data/config.ron` 后窗口自动更新。是"兼容 bevy_asset_loader"章节的可运行实例。
+
+```rust
+app.init_state::<GameState>()
+    .add_loading_state(
+        LoadingState::new(GameState::Loading)
+            .continue_to_state(GameState::Ready)
+            .load_collection::<GameAssets>(),
+    )
+    .add_plugins(GameAssets::hmr_plugin(GameState::Ready));
+```
+
+> **前提**：需要 `bevy/file_watcher` feature（dev-deps 已启用）。
+
 ## Bevy 0.19 兼容性
 
 ### `bevy/file_watcher` 文件监听
@@ -590,7 +743,8 @@ hmr = ["bevy/file_watcher"]
 
 ### Headless 环境配置
 
-无渲染世界（测试 / 示例）下需调用 `app.setup_hmr_headless()` 启用 Messages 缓冲交换。生产环境（有 `DefaultPlugins`）不需要。
+标准的 `DefaultPlugins` 或 `MinimalPlugins` 应用不需要调用
+`setup_hmr_headless()`；该 helper 只用于手动驱动 schedule/message 的特殊测试环境。
 
 ### `Assets::insert` 的事件派发时机
 
