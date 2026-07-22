@@ -111,7 +111,6 @@ pub trait ConfigHmrAppExt {
     /// # impl HmrSource for MyAsset {
     /// #     type Config = MyAsset;
     /// #     fn config(&self) -> &Self::Config { self }
-    /// #     fn from_config(config: Self::Config, _source_path: String) -> Self { config }
     /// # }
     /// # let mut app = App::new();
     /// # app.add_plugins(bevy::asset::AssetPlugin::default());
@@ -171,7 +170,6 @@ pub trait ConfigHmrAppExt {
     /// # impl HmrSource for LevelAsset {
     /// #     type Config = LevelAsset;
     /// #     fn config(&self) -> &Self::Config { self }
-    /// #     fn from_config(c: Self::Config, _p: String) -> Self { c }
     /// # }
     /// # let mut app = App::new();
     /// # app.add_plugins(bevy::asset::AssetPlugin::default());
@@ -420,6 +418,7 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
                 crate::binding::config_binding_registry_system::<ConfigAsset<T>>,
                 crate::binding::config_binding_cleanup_system::<ConfigAsset<T>>,
                 crate::core::hmr_core_system::<ConfigAsset<T>>,
+                crate::core::asset_load_failed_system::<ConfigAsset<T>>,
                 crate::debounce::flush_debounced_refresh::<ConfigAsset<T>>,
                 crate::dependency::dependency_registry_system::<ConfigAsset<T>>,
                 crate::dependency::dependency_cleanup_system::<ConfigAsset<T>>,
@@ -476,6 +475,7 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
                 crate::binding::config_binding_registry_system::<A>,
                 crate::binding::config_binding_cleanup_system::<A>,
                 crate::core::hmr_core_system::<A>,
+                crate::core::asset_load_failed_system::<A>,
                 crate::debounce::flush_debounced_refresh::<A>,
                 crate::dependency::dependency_registry_system::<A>,
                 crate::dependency::dependency_cleanup_system::<A>,

@@ -21,9 +21,7 @@ use bevy::asset::{Asset, AssetId, Assets, Handle};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy_assets_hmr::{
-    ConfigHmrAppExt, ConfigHmrPlugin, ConfigDiff, ConfigRefresh, HmrSource,
-};
+use bevy_assets_hmr::{ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh, HmrSource};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -47,9 +45,6 @@ impl HmrSource for ChildDb {
     }
     fn source_path(&self) -> &str {
         ""
-    }
-    fn from_config(config: ChildDb, _source_path: String) -> Self {
-        config
     }
 }
 
@@ -84,9 +79,6 @@ impl HmrSource for ParentDb {
     fn source_path(&self) -> &str {
         ""
     }
-    fn from_config(config: ParentDb, _source_path: String) -> Self {
-        config
-    }
 }
 
 /// Subscriber: prints whether the refresh is a cascade (empty
@@ -100,9 +92,7 @@ fn on_parent_refresh(mut reader: MessageReader<ConfigRefresh<ParentDb>>) {
         };
         println!(
             "\n[ConfigRefresh<ParentDb>] {kind}\n  source_path: {:?}\n  changed_ids: {:?}\n  new_config: {:?}",
-            refresh.source_path,
-            refresh.changed_ids,
-            refresh.new_config,
+            refresh.source_path, refresh.changed_ids, refresh.new_config,
         );
     }
 }
@@ -158,10 +148,7 @@ fn main() {
     IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
 
     let mut app = App::new();
-    app.add_plugins((
-        bevy::asset::AssetPlugin::default(),
-        bevy::time::TimePlugin,
-    ));
+    app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
 
     // 1. HMR plugin (debounce window 0 for instant dispatch in example).
     app.add_plugins(ConfigHmrPlugin {
@@ -206,15 +193,28 @@ fn main() {
 
     // Eagerly initialize snapshots so first frame doesn't dispatch.
     {
-        let mut snapshots = app.world_mut().resource_mut::<bevy_assets_hmr::LastSnapshot<ChildDb>>();
-        snapshots.map.insert(child_handle.id(), ChildDb {
-            items: vec![ChildItem { id: "c1".into(), v: 1 }],
-        });
-        let mut snapshots = app.world_mut().resource_mut::<bevy_assets_hmr::LastSnapshot<ParentDb>>();
-        snapshots.map.insert(parent_id, ParentDb {
-            items: vec![ParentItem { id: "p1".into() }],
-            child_handle: child_handle.clone(),
-        });
+        let mut snapshots = app
+            .world_mut()
+            .resource_mut::<bevy_assets_hmr::LastSnapshot<ChildDb>>();
+        snapshots.map.insert(
+            child_handle.id(),
+            ChildDb {
+                items: vec![ChildItem {
+                    id: "c1".into(),
+                    v: 1,
+                }],
+            },
+        );
+        let mut snapshots = app
+            .world_mut()
+            .resource_mut::<bevy_assets_hmr::LastSnapshot<ParentDb>>();
+        snapshots.map.insert(
+            parent_id,
+            ParentDb {
+                items: vec![ParentItem { id: "p1".into() }],
+                child_handle: child_handle.clone(),
+            },
+        );
     }
 
     app.insert_resource(SimIds {
@@ -226,9 +226,7 @@ fn main() {
     app.add_systems(Update, (on_parent_refresh, simulate));
 
     println!("=== bevy_assets_hmr dependency_cascade 示例启动 ===");
-    println!(
-        "ChildDb -> ParentDb 级联关系通过 ParentDb.child_handle 上的 #[dependency] 属性建立"
-    );
+    println!("ChildDb -> ParentDb 级联关系通过 ParentDb.child_handle 上的 #[dependency] 属性建立");
     println!("第 5 帧: 修改 ChildDb -> ParentDb 订阅方收到 CASCADE 事件");
     println!("第 9 帧: 删除 ChildDb -> ParentDb 订阅方再次收到 CASCADE 事件");
     println!();

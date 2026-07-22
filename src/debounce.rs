@@ -21,7 +21,7 @@
 use crate::binding::HandleEntityCache;
 use crate::core::{HmrSource, LastSnapshot};
 use crate::diff::ConfigDiff;
-use crate::refresh::{ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind};
+use crate::refresh::{ConfigRefresh, ConfigRemoved, DiffKind};
 use bevy::asset::{AssetId, Assets};
 use bevy::ecs::message::MessageWriter;
 use bevy::prelude::{Res, ResMut, Resource};
@@ -95,12 +95,6 @@ pub(crate) fn enqueue_removed<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>,
 
 /// System: flush any pending refreshes whose debounce window has elapsed.
 ///
-/// 注意：`assets` 参数从 `Res<Assets<A>>` 改为 `ResMut<Assets<A>>`，
-/// 因为回滚逻辑需要在 `assets.get(id)` 失败时执行 `assets.insert(id, ...)`
-/// 将旧快照重建的资产插回。这会与所有读 `Assets<A>` 的系统串行化——
-/// 对于注册了大量 asset 类型的应用可能有微小的帧时间影响，但回滚是
-/// 低频事件（仅在文件损坏/语法错误时触发），实际影响可忽略。
-///
 /// For each ready id:
 /// 1. Look up the new `A` from `Assets`.
 /// 2. Look up the previous `A::Config` from `LastSnapshot<A>`.
@@ -118,12 +112,11 @@ pub(crate) fn enqueue_removed<A: HmrSource>(debouncer: &mut RefreshDebouncer<A>,
 /// existed) and cleans up the snapshot.
 pub fn flush_debounced_refresh<A: HmrSource>(
     mut debouncer: ResMut<RefreshDebouncer<A>>,
-    mut assets: ResMut<Assets<A>>,
+    assets: Res<Assets<A>>,
     cache: Res<HandleEntityCache<A>>,
     mut snapshots: ResMut<LastSnapshot<A>>,
     mut refresh_evts: MessageWriter<ConfigRefresh<A::Config>>,
     mut removed_evts: MessageWriter<ConfigRemoved<A::Config>>,
-    mut failed_evts: MessageWriter<ConfigReloadFailed<A::Config>>,
     graph: Res<crate::dependency::DependencyGraph>,
     mut cascade_queue: ResMut<crate::dependency::CascadeQueue>,
 ) {
@@ -179,9 +172,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             // missing child. ----
             let parents = graph.parents_of(id.untyped());
             for (parent_untyped, parent_type) in parents {
-                cascade_queue
-                    .pending
-                    .push((parent_untyped, parent_type));
+                cascade_queue.pending.push((parent_untyped, parent_type));
             }
         }
     }
@@ -203,38 +194,8 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             debouncer.pending.remove(&id);
 
             let Some(new_asset) = assets.get(id) else {
-                // --- 回滚：新版本加载失败，用旧 snapshot 重建 Asset 并插回 ---
-                if let Some(old_config) = snapshots.map.get(&id).cloned() {
-                    let source_path = snapshots.source_paths.get(&id).cloned().unwrap_or_default();
-
-                    // 用旧 snapshot 重建 Asset 并插回 Assets
-                    let rolled_back = A::from_config(old_config.clone(), source_path.clone());
-                    let _ = assets.insert(id, rolled_back);
-
-                    // 收集关联实体
-                    let target_entities: Vec<_> = cache
-                        .get_entities(&id)
-                        .map(|s| s.iter().copied().collect())
-                        .unwrap_or_default();
-
-                    // 派发失败事件（包含 source_path 以便定位问题文件）
-                    failed_evts.write(ConfigReloadFailed {
-                        source_path: source_path.clone(),
-                        error: format!(
-                            "Asset corrupted or failed to load for '{}'; rolled back to previous version",
-                            source_path
-                        ),
-                        target_entities,
-                        current_config: old_config,
-                    });
-
-                    // 记录 flush 时间（cooldown 保护）
-                    debouncer.flushed_at.insert(id, Instant::now());
-                } else {
-                    // 无旧版本可回滚：清理 snapshot
-                    snapshots.map.remove(&id);
-                    snapshots.source_paths.remove(&id);
-                }
+                // Failures are reported by `asset_load_failed_system`; an
+                // absent value here is a removal or stale asset event.
                 continue;
             };
 
@@ -293,9 +254,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             // get re-dispatched on the next frame. ----
             let parents = graph.parents_of(id.untyped());
             for (parent_untyped, parent_type) in parents {
-                cascade_queue
-                    .pending
-                    .push((parent_untyped, parent_type));
+                cascade_queue.pending.push((parent_untyped, parent_type));
             }
 
             // 记录 flush 时间（cooldown 保护，防止写回死循环）

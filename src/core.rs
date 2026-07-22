@@ -27,9 +27,9 @@ use crate::asset::ConfigAsset;
 use crate::binding::HandleEntityCache;
 use crate::debounce::{RefreshDebouncer, enqueue, enqueue_removed};
 use crate::diff::ConfigDiff;
-use bevy::asset::{Asset, AssetEvent, AssetId};
+use bevy::asset::{Asset, AssetEvent, AssetId, AssetLoadFailedEvent};
 use bevy::ecs::system::Query;
-use bevy::prelude::{MessageReader, ResMut, Resource};
+use bevy::prelude::{MessageReader, MessageWriter, Res, ResMut, Resource};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
@@ -57,11 +57,6 @@ pub trait HmrSource: Asset + Send + Sync + 'static {
     fn source_path(&self) -> &str {
         ""
     }
-    /// 从 Config 值和 source_path 重建 Asset（用于回滚）。
-    ///
-    /// 包装模式（`ConfigAsset<T>`）自动实现为 `ConfigAsset { raw: config, source_path }`。
-    /// 直接模式用户需手动实现：通常直接返回 config（因为 Asset 本身就是 Config）。
-    fn from_config(config: Self::Config, source_path: String) -> Self;
 }
 
 /// Per-type snapshot of the last-seen `Config` value for each `AssetId<A>`.
@@ -124,6 +119,39 @@ pub fn hmr_core_system<A: HmrSource>(
     }
 }
 
+/// Forward Bevy asset loading failures into the typed HMR failure message.
+///
+/// Bevy keeps the previously loaded asset when a hot reload fails. The HMR
+/// layer reports the failure and last valid snapshot without writing an
+/// artificial rollback asset back into `Assets<A>`.
+pub fn asset_load_failed_system<A: HmrSource>(
+    mut failures: MessageReader<AssetLoadFailedEvent<A>>,
+    snapshots: Res<LastSnapshot<A>>,
+    cache: Res<HandleEntityCache<A>>,
+    mut failed_messages: MessageWriter<crate::refresh::ConfigReloadFailed<A::Config>>,
+) {
+    for failure in failures.read() {
+        let current_config = snapshots.map.get(&failure.id).cloned();
+        let source_path = snapshots
+            .source_paths
+            .get(&failure.id)
+            .cloned()
+            .unwrap_or_else(|| failure.path.to_string());
+        let target_entities = cache
+            .get_entities(&failure.id)
+            .map(|entities| entities.iter().copied().collect())
+            .unwrap_or_default();
+
+        failed_messages.write(crate::refresh::ConfigReloadFailed {
+            asset_id: failure.id.untyped(),
+            source_path,
+            error: failure.error.to_string(),
+            target_entities,
+            current_config,
+        });
+    }
+}
+
 /// System: periodic cache validation (drift correction).
 ///
 /// Runs every 30 seconds (via `on_timer`). Walks all entities that currently
@@ -174,11 +202,5 @@ impl<T: HmrAsset> HmrSource for ConfigAsset<T> {
     }
     fn source_path(&self) -> &str {
         &self.source_path
-    }
-    fn from_config(config: T, source_path: String) -> Self {
-        ConfigAsset {
-            raw: config,
-            source_path,
-        }
     }
 }

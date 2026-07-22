@@ -157,7 +157,6 @@ impl SimpleConfigDiff for LevelAsset {
 impl HmrSource for LevelAsset {
     type Config = LevelAsset;
     fn config(&self) -> &Self::Config { self }
-    fn from_config(config: Self::Config, _source_path: String) -> Self { config }
 }
 
 // 3. 用户自己的 Loader（和 bevy 官方 custom_asset.rs 一样）
@@ -664,7 +663,6 @@ app.register_config::<NpcDatabase>("data/npc.ron")
 impl HmrSource for LevelAsset {
     type Config = LevelAsset;
     fn config(&self) -> &Self { self }
-    fn from_config(config: Self::Config, _source_path: String) -> Self { config }
 }
 
 app.init_asset::<LevelAsset>();
@@ -767,7 +765,7 @@ hmr = ["bevy/file_watcher"]
 
 ### Q: ron/json 语法写错了会怎样？会丢失数据吗？
 
-不会。如果 `ConfigLoader` 解析失败导致资产无法加载，框架会自动回滚到上一有效版本，用快照重建资产并插回 `Assets`。同时派发 `ConfigReloadFailed<T>` 事件通知订阅方。控制台也会输出错误信息。
+不会。Bevy 在热重载失败时会保留上一有效资产；插件监听真实的加载失败事件并派发 `ConfigReloadFailed<T>`，其中包含资产 ID、源路径、原始错误以及可用时的上一有效配置。插件不会向 `Assets` 人工回写快照，因此不会额外制造一次 `Modified` 事件。
 
 ### Q: 修改 GLTF 贴图后，材质为什么不联动刷新？
 

@@ -45,10 +45,6 @@ impl HmrSource for DirectConfig {
     fn config(&self) -> &Self::Config {
         self
     }
-
-    fn from_config(config: Self::Config, _source_path: String) -> Self {
-        config
-    }
 }
 
 #[derive(AssetCollection, Resource, HmrAutoWatch)]

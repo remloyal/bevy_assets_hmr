@@ -10,7 +10,9 @@
 //! 4. `LastSnapshot<T>` is updated to the new version after dispatch.
 //! 5. Empty diffs (content unchanged) are not dispatched.
 
-use bevy::asset::{Asset, AssetId, Assets, Handle, UntypedAssetId};
+use bevy::asset::{
+    Asset, AssetId, AssetLoadError, AssetLoadFailedEvent, AssetPath, Assets, Handle,
+};
 use bevy::ecs::message::{MessageReader, Messages};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -59,14 +61,22 @@ fn capture_refresh_system(
 
 /// Helper: build a minimal App with the HMR plugin + TestDb registered.
 fn make_app(debounce_window: Duration) -> App {
+    make_app_at(debounce_window, "data/test.ron")
+}
+
+fn make_app_at(debounce_window: Duration, path: &str) -> App {
     use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
     // AssetServer::load 需要 IoTaskPool，测试环境默认没初始化，这里手动建一个。
-    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(1).build());
     let mut app = App::new();
-    app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
+    app.add_plugins((
+        bevy::app::TaskPoolPlugin::default(),
+        bevy::asset::AssetPlugin::default(),
+        bevy::time::TimePlugin,
+    ));
     app.add_plugins(ConfigHmrPlugin { debounce_window });
     app.setup_hmr_headless();
-    app.register_config::<TestDb>("data/test.ron");
+    app.register_config::<TestDb>(path);
     app.insert_resource(CapturedRefresh::default());
     app.add_systems(Update, capture_refresh_system);
     app
@@ -538,7 +548,7 @@ fn capture_asset_changed_system(
 
 fn make_watch_app() -> App {
     use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
-    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(1).build());
     let mut app = App::new();
     app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
     app.add_plugins(ConfigHmrPlugin::default());
@@ -723,37 +733,30 @@ fn watch_asset_despawned_entity_removed_from_cache() {
 }
 
 // ===========================================================================
-// Rollback + ConfigReloadFailed tests
+// Asset load failure + ConfigReloadFailed tests
 // ===========================================================================
 
 #[derive(Resource, Default)]
-struct CapturedReloadFailed(Option<ConfigReloadFailed<TestDb>>);
+struct CapturedReloadFailed(Vec<ConfigReloadFailed<TestDb>>);
 
 fn capture_reload_failed_system(
     mut reader: MessageReader<ConfigReloadFailed<TestDb>>,
     mut captured: ResMut<CapturedReloadFailed>,
 ) {
     for evt in reader.read() {
-        captured.0 = Some(evt.clone());
+        captured.0.push(evt.clone());
     }
 }
 
 #[test]
-fn rollback_on_asset_load_failure_dispatches_config_reload_failed() {
-    // Scenario: an asset has a prior snapshot but the asset is removed from
-    // Assets (simulating a loader failure on reload). flush_debounced_refresh
-    // should:
-    // 1. Reconstruct the asset from snapshot via HmrSource::from_config
-    // 2. Re-insert it into Assets (rollback)
-    // 3. Dispatch ConfigReloadFailed
-
+fn asset_load_failure_dispatches_config_reload_failed_and_keeps_old_asset() {
     let mut app = make_app(Duration::from_millis(0));
     app.add_systems(Update, capture_reload_failed_system);
     app.insert_resource(CapturedReloadFailed::default());
 
     let asset_id = make_id(200);
 
-    // Step 1: Insert initial asset (first load → snapshot auto-created)
+    // Insert the initial valid asset and let HMR initialize its snapshot.
     {
         let mut assets = app
             .world_mut()
@@ -772,7 +775,6 @@ fn rollback_on_asset_load_failure_dispatches_config_reload_failed() {
         );
     }
 
-    // Run frames: snapshot should be auto-initialized.
     for _ in 0..3 {
         app.update();
     }
@@ -785,94 +787,108 @@ fn rollback_on_asset_load_failure_dispatches_config_reload_failed() {
         );
     }
 
-    // Step 2: Remove the asset from Assets (simulate loader failure).
-    {
-        let mut assets = app
-            .world_mut()
-            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
-        assets.remove(asset_id);
-    }
-
-    // Step 3: Manually enqueue the id in the debouncer so flush runs.
-    {
-        let mut debouncer = app
-            .world_mut()
-            .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
-        debouncer
-            .pending
-            .insert(asset_id, std::time::Instant::now());
-    }
-
-    // Step 4: Run frames → flush should detect missing asset, rollback,
-    //         and dispatch ConfigReloadFailed.
-    for _ in 0..5 {
-        app.update();
-    }
-
-    // Verify ConfigReloadFailed was dispatched.
-    let captured = app.world().resource::<CapturedReloadFailed>();
-    let evt = captured
-        .0
-        .as_ref()
-        .expect("ConfigReloadFailed should be dispatched on rollback");
-    assert_eq!(evt.source_path, "data/test.ron");
-    assert_eq!(
-        evt.current_config.items[0].id, "x",
-        "current_config should be the old snapshot value"
-    );
-    assert_eq!(evt.current_config.items[0].n, 42);
-    assert!(
-        evt.error.contains("rolled back"),
-        "error message should mention rollback"
-    );
-
-    // Verify asset was re-inserted into Assets (rollback).
-    let assets = app.world().resource::<Assets<ConfigAsset<TestDb>>>();
-    let rolled_back = assets
-        .get(asset_id)
-        .expect("asset should be re-inserted by rollback");
-    assert_eq!(
-        rolled_back.raw.items[0].n, 42,
-        "re-inserted asset should match snapshot value"
-    );
-    assert_eq!(rolled_back.source_path, "data/test.ron");
-}
-
-#[test]
-fn no_rollback_when_no_snapshot_exists() {
-    // If an asset id has no prior snapshot, assets.get(id) → None should
-    // just clean up (no crash, no ConfigReloadFailed, nothing re-inserted).
-
-    let mut app = make_app(Duration::from_millis(0));
-    app.add_systems(Update, capture_reload_failed_system);
-    app.insert_resource(CapturedReloadFailed::default());
-
-    let asset_id = make_id(201);
-
-    // Manually enqueue an id that has no snapshot (and no asset).
-    {
-        let mut debouncer = app
-            .world_mut()
-            .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
-        debouncer
-            .pending
-            .insert(asset_id, std::time::Instant::now());
-    }
+    // Send the same typed failure message emitted by Bevy's AssetServer when
+    // ConfigLoader returns an error. The already-loaded asset remains valid.
+    app.world_mut()
+        .resource_mut::<Messages<AssetLoadFailedEvent<ConfigAsset<TestDb>>>>()
+        .write(AssetLoadFailedEvent {
+            id: asset_id,
+            path: AssetPath::from("data/test.ron"),
+            error: AssetLoadError::EmptyPath(AssetPath::from("")),
+        });
 
     for _ in 0..3 {
         app.update();
     }
 
-    // No ConfigReloadFailed should be dispatched.
     let captured = app.world().resource::<CapturedReloadFailed>();
+    let evt = captured
+        .0
+        .iter()
+        .find(|event| event.asset_id == asset_id.untyped())
+        .expect("ConfigReloadFailed should be dispatched for Bevy load failure");
+    assert_eq!(evt.asset_id, asset_id.untyped());
+    assert_eq!(evt.source_path, "data/test.ron");
+    let current_config = evt
+        .current_config
+        .as_ref()
+        .expect("failed reload should expose the last valid config");
+    assert_eq!(
+        current_config.items[0].id, "x",
+        "current_config should be the last valid snapshot"
+    );
+    assert_eq!(current_config.items[0].n, 42);
     assert!(
-        captured.0.is_none(),
-        "no ConfigReloadFailed when no snapshot exists"
+        evt.error.contains("empty path"),
+        "the original Bevy load error should be preserved"
     );
 
-    // Asset should NOT be in Assets (nothing was re-inserted).
+    // No artificial reinsert is needed: Bevy retains the last valid asset.
     let assets = app.world().resource::<Assets<ConfigAsset<TestDb>>>();
-    assert!(assets.get(asset_id).is_none());
+    let retained = assets
+        .get(asset_id)
+        .expect("the last valid asset should remain available");
+    assert_eq!(retained.raw.items[0].n, 42);
+    assert_eq!(retained.source_path, "data/test.ron");
+}
+
+#[test]
+fn initial_load_failure_dispatches_without_current_config() {
+    let mut app = make_app(Duration::from_millis(0));
+    app.add_systems(Update, capture_reload_failed_system);
+    app.insert_resource(CapturedReloadFailed::default());
+
+    let asset_id = make_id(201);
+    app.world_mut()
+        .resource_mut::<Messages<AssetLoadFailedEvent<ConfigAsset<TestDb>>>>()
+        .write(AssetLoadFailedEvent {
+            id: asset_id,
+            path: AssetPath::from("data/missing.ron"),
+            error: AssetLoadError::EmptyPath(AssetPath::from("")),
+        });
+
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let captured = app.world().resource::<CapturedReloadFailed>();
+    let event = captured
+        .0
+        .iter()
+        .find(|event| event.asset_id == asset_id.untyped())
+        .expect("initial load failures should also be observable");
+    assert_eq!(event.asset_id, asset_id.untyped());
+    assert_eq!(event.source_path, "data/missing.ron");
+    assert!(event.current_config.is_none());
+}
+
+#[test]
+fn invalid_ron_asset_emits_config_reload_failed_end_to_end() {
+    let mut app = make_app_at(Duration::from_millis(0), "data/invalid_test.ron");
+    app.add_systems(Update, capture_reload_failed_system);
+    app.insert_resource(CapturedReloadFailed::default());
+
+    for _ in 0..100 {
+        app.update();
+        if !app.world().resource::<CapturedReloadFailed>().0.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let captured = app.world().resource::<CapturedReloadFailed>();
+    let event = captured
+        .0
+        .iter()
+        .find(|event| event.source_path == "data/invalid_test.ron")
+        .expect("invalid RON should flow through AssetServer failure handling");
+    assert_eq!(event.source_path, "data/invalid_test.ron");
+    assert!(event.current_config.is_none());
+    assert!(
+        event.error.contains("ron parse error"),
+        "loader parse error should be preserved, got: {}",
+        event.error
+    );
 }
 
 // ===========================================================================
@@ -1024,9 +1040,8 @@ fn cooldown_allows_events_after_window_elapses() {
         let mut debouncer = app
             .world_mut()
             .resource_mut::<RefreshDebouncer<ConfigAsset<TestDb>>>();
-        let long_ago = std::time::Instant::now()
-            - debouncer.cooldown
-            - std::time::Duration::from_secs(1);
+        let long_ago =
+            std::time::Instant::now() - debouncer.cooldown - std::time::Duration::from_secs(1);
         debouncer.flushed_at.insert(asset_id, long_ago);
     }
 
@@ -1149,9 +1164,6 @@ impl HmrSource for ChildDb {
     fn source_path(&self) -> &str {
         ""
     }
-    fn from_config(config: ChildDb, _source_path: String) -> Self {
-        config
-    }
 }
 
 /// A parent config that holds a Handle<ConfigAsset<ChildDb>>. The
@@ -1182,14 +1194,11 @@ impl HmrSource for ParentDb {
     fn source_path(&self) -> &str {
         ""
     }
-    fn from_config(config: ParentDb, _source_path: String) -> Self {
-        config
-    }
 }
 
 fn make_cascade_app(debounce_window: Duration) -> App {
     use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
-    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(0).build());
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(1).build());
     let mut app = App::new();
     app.add_plugins((bevy::asset::AssetPlugin::default(), bevy::time::TimePlugin));
     app.add_plugins(ConfigHmrPlugin { debounce_window });
@@ -1219,9 +1228,7 @@ fn capture_parent_refresh_system(
 /// handle. The returned handle's `AssetId` is used as the dependency edge
 /// key in `DependencyGraph`.
 fn insert_child_and_handle(app: &mut App, child: ChildDb) -> Handle<ChildDb> {
-    app.world_mut()
-        .resource_mut::<Assets<ChildDb>>()
-        .add(child)
+    app.world_mut().resource_mut::<Assets<ChildDb>>().add(child)
 }
 
 #[test]
@@ -1232,7 +1239,7 @@ fn dependency_graph_is_populated_on_parent_load() {
     app.insert_resource(CapturedParentRefresh::default());
     app.add_systems(Update, capture_parent_refresh_system);
 
-    let child_id = AssetId::<ChildDb>::Uuid {
+    let _child_id = AssetId::<ChildDb>::Uuid {
         uuid: Uuid::from_u128(1100),
     };
     let child_handle = insert_child_and_handle(
@@ -1279,7 +1286,7 @@ fn cascade_triggers_config_refresh_on_parent() {
     app.insert_resource(CapturedParentRefresh::default());
     app.add_systems(Update, capture_parent_refresh_system);
 
-    let child_id = AssetId::<ChildDb>::Uuid {
+    let _child_id = AssetId::<ChildDb>::Uuid {
         uuid: Uuid::from_u128(1200),
     };
     let child_handle = insert_child_and_handle(
@@ -1329,9 +1336,10 @@ fn cascade_triggers_config_refresh_on_parent() {
     }
 
     let captured = app.world().resource::<CapturedParentRefresh>();
-    let evt = captured.0.as_ref().expect(
-        "cascade should have fired ConfigRefresh<ParentDb>",
-    );
+    let evt = captured
+        .0
+        .as_ref()
+        .expect("cascade should have fired ConfigRefresh<ParentDb>");
     assert!(
         evt.changed_ids.is_empty(),
         "cascade-fired ConfigRefresh should have empty changed_ids"
@@ -1470,9 +1478,10 @@ fn cascade_triggers_on_child_removed() {
     }
 
     let captured = app.world().resource::<CapturedParentRefresh>();
-    let evt = captured.0.as_ref().expect(
-        "cascade should fire ConfigRefresh<ParentDb> after child removal",
-    );
+    let evt = captured
+        .0
+        .as_ref()
+        .expect("cascade should fire ConfigRefresh<ParentDb> after child removal");
     assert!(
         evt.changed_ids.is_empty(),
         "removal cascade should also have empty changed_ids"

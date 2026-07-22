@@ -44,10 +44,6 @@ impl HmrSource for LevelAsset {
     fn config(&self) -> &Self::Config {
         self
     }
-    fn from_config(config: Self::Config, _source_path: String) -> Self {
-        // 直接模式：Asset 就是 Config，直接返回
-        config
-    }
 }
 
 /// 自定义 Loader：解析 `.level` 格式（实际就是 ron，演示用）。

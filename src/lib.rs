@@ -41,7 +41,10 @@ pub use asset::{ConfigAsset, ConfigHandle};
 pub use binding::{
     ConfigBind, HandleEntityCache, config_binding_cleanup_system, config_binding_registry_system,
 };
-pub use core::{HmrAsset, HmrSource, LastSnapshot, cache_validation_system, hmr_core_system};
+pub use core::{
+    HmrAsset, HmrSource, LastSnapshot, asset_load_failed_system, cache_validation_system,
+    hmr_core_system,
+};
 pub use debounce::{RefreshDebouncer, flush_debounced_refresh};
 pub use dependency::{
     CascadeQueue, DependencyGraph, cascade_dispatch_system, dependency_cleanup_system,
