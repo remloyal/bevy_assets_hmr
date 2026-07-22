@@ -223,16 +223,19 @@ fn main() {
 ### 4. 订阅 ConfigRefresh 做精准刷新
 
 ```rust
-use bevy_assets_hmr::ConfigRefresh;
+use bevy_assets_hmr::{ConfigRefresh, RefreshCause};
 use bevy::ecs::message::MessageReader;
 
 // 包装模式：ConfigRefresh<NpcDatabase>（Config 类型 = NpcDatabase）
 fn on_npc_refresh(mut reader: MessageReader<ConfigRefresh<NpcDatabase>>) {
     for refresh in reader.read() {
         // refresh.new_config: NpcDatabase（直接是 Config，不需要 .raw）
+        // refresh.asset_id: UntypedAssetId（区分同类型的多个配置文件）
+        // refresh.delta: ConfigDelta（分别包含 added / removed / modified）
         // refresh.changed_ids: HashSet<String>（added ∪ removed ∪ modified）
         // refresh.target_entities: Vec<Entity>（ConfigBind 绑定的实体）
         // refresh.diff_kind: DiffKind（Added/Removed/Modified/Mixed）
+        // refresh.cause: RefreshCause（Direct/Dependency/Manual/Recovery）
         println!("变更 id: {:?}", refresh.changed_ids);
         for id in &refresh.changed_ids {
             if let Some(npc) = refresh.new_config.npcs.iter().find(|n| &n.id == id) {
@@ -370,8 +373,10 @@ pub struct GameAssets {
 | `ConfigDiff` | trait：`fn diff(old, new) -> (added, removed, modified)`。支持 `#[derive(ConfigDiff)]`（含 `id_type` 参数支持 `u32`/`Uuid` 等非 String 主键） |
 | `HmrSource` | trait：从 Asset 提取 Config（包装模式自动 impl，直接模式用户 impl） |
 | `ConfigAsset<T>` | 包装 Asset：`{ raw: T, source_path: String }`（仅包装模式） |
-| `ConfigRefresh<T>` | Message：`{ new_config: T, target_entities, changed_ids, diff_kind, source_path }` |
-| `ConfigRemoved<T>` | Message：资产被删除时派发，携带 `target_entities` + `source_path` |
+| `ConfigRefresh<T>` | Message：携带 `asset_id`、结构化 `delta`、兼容用 `changed_ids`、`cause`、当前配置与目标实体 |
+| `ConfigRemoved<T>` | Message：资产被删除时派发，携带 `asset_id`、`target_entities` 与 `source_path` |
+| `ConfigDelta<Id>` | 分别保存 added、removed、modified ID 集合 |
+| `RefreshCause` | `Direct / Dependency { triggered_by } / Manual / Recovery` |
 | `SimpleConfigDiff` | 简化 trait：只需 `PartialEq`，自动获得 `ConfigDiff`（单对象/枚举用） |
 | `DiffKind` | `Added / Removed / Modified / Mixed` |
 | `ConfigBind<A>` | Component：实体绑定到某个 handle |
@@ -428,7 +433,7 @@ pub struct GameAssets {
 5. **自动跳过空 diff**：diff 为空时不派发，订阅方不会收到无意义的刷新
 6. **自动 debounce**：短时间内的多次写入合并为一次刷新（窗口可配置）
 7. **自动缓存校验**：每 30 秒自动校验 `HandleEntityCache` 与实际组件的一致性
-8. **自动依赖图 + 级联**：构建跨类型 `Handle<*>` 依赖图，子资产变更自动派发 `ConfigRefresh` 给父资产订阅方（`changed_ids` 为空作为级联标记）
+8. **自动依赖图 + 级联**：构建跨类型 `Handle<*>` 依赖图，子资产变更自动派发 `ConfigRefresh` 给父资产订阅方，并在 `RefreshCause::Dependency` 中保留触发源
 
 ## 依赖链级联（`DependencyGraph`）
 
@@ -439,20 +444,21 @@ pub struct GameAssets {
 1. **`#[derive(Asset)]`** 自动生成 `VisitAssetDependencies` impl，遍历所有标有 `#[dependency]` 的 `Handle<*>` 字段。
 2. **`dependency_registry_system<A>`**（注册在 `flush_debounced_refresh` 之后）每次 `AssetEvent<A>::Added/Modified` 时重建该资产在 `DependencyGraph` 中的边。
 3. **`flush_debounced_refresh<A>`**（修改后）在派发 `ConfigRefresh` 后，查询图找出此资产的所有父资产，推入 `CascadeQueue.pending`。
-4. **`cascade_dispatch_system<A>`**（每类型，链末尾）排空 `CascadeQueue` 中匹配当前类型的条目，为每个父资产派发 `ConfigRefresh<A::Config>`（**`changed_ids` 为空**作为级联标记）。
+4. **`cascade_dispatch_system<A>`**（每类型，链末尾）排空 `CascadeQueue` 中匹配当前类型的条目，为每个父资产派发一次 `ConfigRefresh<A::Config>`，并合并本帧所有 `triggered_by` 子资产。
 
 ### 订阅方语义
 
 ```rust
 fn on_parent_refreshed(mut reader: MessageReader<ConfigRefresh<ParentDb>>) {
     for refresh in reader.read() {
-        if refresh.changed_ids.is_empty() {
-            // 依赖级联：父资产本身未变，但有子资产被修改。
-            // 重新派生任何基于子资产计算的状态。
-            rederive_state_from_children(&refresh.new_config);
-        } else {
-            // 父资产本身变更（diff 有变化）。
-            apply_diff(&refresh.changed_ids, &refresh.new_config);
+        match &refresh.cause {
+            RefreshCause::Dependency { triggered_by } => {
+                rederive_state_from_children(&refresh.new_config, triggered_by);
+            }
+            RefreshCause::Direct => {
+                apply_diff(&refresh.delta, &refresh.new_config);
+            }
+            _ => {}
         }
     }
 }
@@ -494,7 +500,7 @@ app.add_plugins(ConfigHmrPlugin::default())
 | 符号 | 说明 |
 |---|---|
 | `DependencyGraph` | Resource：`UntypedAssetId -> Vec<(parent_untyped, parent TypeId)>` |
-| `CascadeQueue` | Resource：`Vec<(parent_untyped, parent_type)>` 待级联条目 |
+| `CascadeQueue` | Resource：包含 parent、类型与 `triggered_by` 的待级联请求 |
 | `dependency_registry_system<A>` | 系统：从 `AssetEvent<A>::Added/Modified` 重建依赖边 |
 | `dependency_cleanup_system<A>` | 系统：从 `AssetEvent<A>::Removed` 清理边 |
 | `cascade_dispatch_system<A>` | 系统：派发级联 `ConfigRefresh<A::Config>`（下帧执行） |

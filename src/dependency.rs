@@ -17,23 +17,21 @@
 //!
 //! 3. **`flush_debounced_refresh<A>`** (existing, modified) at the end of its
 //!    successful dispatch path, queries the graph for the asset's *parents*
-//!    and pushes `(child_id, parent_type, parent_id)` entries into a
-//!    per-frame `CascadeQueue`.
+//!    and pushes parent plus triggering-child entries into a per-frame
+//!    `CascadeQueue`.
 //!
 //! 4. **`cascade_dispatch_system<A>`** (per-type, chained last) reads the
 //!    `CascadeQueue`, filters entries where `parent_type == TypeId::of::<A>()`,
-//!    and dispatches a **`ConfigRefresh<T>`** (with empty `changed_ids` and
-//!    a new `triggered_by` field) to the parent's subscribers.
+//!    and dispatches a **`ConfigRefresh<T>`** with
+//!    `RefreshCause::Dependency { triggered_by }` to parent subscribers.
 //!
 //! # Subscriber semantics
 //!
-//! Cascade-fired `ConfigRefresh<T>` events have `changed_ids` empty and a
-//! non-empty `source_path` / `new_config` from the parent's current state.
-//! Subscribers can detect a cascade via:
+//! Cascade-fired `ConfigRefresh<T>` events have an empty delta and carry the
+//! parent's current state. Subscribers can detect a cascade via:
 //! ```ignore
-//! if refresh.changed_ids.is_empty() {
-//!     // Dependency cascade: parent asset's value unchanged, but a child
-//!     // was modified. Re-derive any state computed from the child.
+//! if let RefreshCause::Dependency { triggered_by } = &refresh.cause {
+//!     // Re-derive state using the complete trigger set.
 //! }
 //! ```
 //!
@@ -73,19 +71,23 @@ pub struct DependencyGraph {
 /// [`cascade_dispatch_system`] (one such system per registered type).
 #[derive(Resource, Default)]
 pub struct CascadeQueue {
-    /// `(parent_id, parent_type)` entries pending cascade dispatch.
-    pub pending: Vec<(UntypedAssetId, TypeId)>,
+    /// Requests pending cascade dispatch.
+    pub pending: Vec<CascadeRequest>,
+}
+
+/// One dependency-triggered parent refresh request.
+#[derive(Clone, Copy, Debug)]
+pub struct CascadeRequest {
+    pub parent_id: UntypedAssetId,
+    pub parent_type: TypeId,
+    pub triggered_by: UntypedAssetId,
 }
 
 impl DependencyGraph {
     /// Record the dependency edges for a parent asset by walking its
     /// `visit_dependencies` callback. Clears any previous edges for this
     /// parent before re-adding, so callers don't need to pre-clean.
-    pub fn rebuild_for<A: HmrSource>(
-        &mut self,
-        parent_id: AssetId<A>,
-        parent_asset: &A,
-    ) {
+    pub fn rebuild_for<A: HmrSource>(&mut self, parent_id: AssetId<A>, parent_asset: &A) {
         let parent_untyped = parent_id.untyped();
         // Remove any previous edges where this parent was listed as a
         // dependent of some child.
@@ -124,10 +126,7 @@ impl DependencyGraph {
 
     /// Look up all parents of the given child id, deduplicated by parent id.
     pub fn parents_of(&self, child: UntypedAssetId) -> Vec<(UntypedAssetId, TypeId)> {
-        self.parents_of
-            .get(&child)
-            .cloned()
-            .unwrap_or_default()
+        self.parents_of.get(&child).cloned().unwrap_or_default()
     }
 }
 
@@ -175,8 +174,8 @@ pub fn dependency_cleanup_system<A: HmrSource>(
 }
 
 /// System: drain [`CascadeQueue`] entries whose parent type matches `A`,
-/// and dispatch a `ConfigRefresh<A::Config>` with empty `changed_ids` for
-/// each parent asset that still exists.
+/// and dispatch one dependency-caused `ConfigRefresh<A::Config>` for each
+/// parent asset that still exists.
 ///
 /// Chained as the **last** system in the per-type pipeline (after
 /// `flush_debounced_refresh` and `dependency_registry_system`), so the
@@ -185,12 +184,13 @@ pub fn dependency_cleanup_system<A: HmrSource>(
 /// # Subscriber semantics
 ///
 /// The dispatched `ConfigRefresh<T>` has:
-/// - `changed_ids`: empty (the parent asset itself didn't change)
+/// - `delta` / `changed_ids`: empty (the parent asset itself didn't change)
+/// - `cause`: dependency with all triggering child asset ids
 /// - `new_config`: the parent's *current* `Assets<A>` value (re-derived)
 /// - `source_path`: the parent's source path (looked up via
 ///   `Assets<A>::get(id)` → `HmrSource::source_path`)
 ///
-/// Subscribers detect a cascade via `changed_ids.is_empty()`. The parent
+/// Subscribers detect a cascade via `RefreshCause::Dependency`. The parent
 /// asset is guaranteed to still exist in `Assets<A>` when we read it (we
 /// skip otherwise), so a despawned parent won't receive a stale event.
 ///
@@ -211,18 +211,21 @@ pub fn cascade_dispatch_system<A: HmrSource>(
     // Deduplicate parent ids so a parent enqueued multiple times in one
     // frame (e.g. via both the removed- and modified-cascade paths) only
     // receives a single `ConfigRefresh`.
-    let mut kept: Vec<(UntypedAssetId, TypeId)> = Vec::new();
-    let mut to_dispatch: HashSet<UntypedAssetId> = HashSet::new();
+    let mut kept = Vec::new();
+    let mut to_dispatch: HashMap<UntypedAssetId, HashSet<UntypedAssetId>> = HashMap::new();
     for entry in queue.pending.drain(..) {
-        if entry.1 == target_type {
-            to_dispatch.insert(entry.0);
+        if entry.parent_type == target_type {
+            to_dispatch
+                .entry(entry.parent_id)
+                .or_default()
+                .insert(entry.triggered_by);
         } else {
             kept.push(entry);
         }
     }
     queue.pending = kept;
 
-    for parent_untyped in to_dispatch {
+    for (parent_untyped, triggered_by) in to_dispatch {
         // Convert untyped -> typed (debug-checked in debug builds; silent
         // type mismatch in release means we just skip, which is safe).
         let parent_id: AssetId<A> = parent_untyped.typed_debug_checked::<A>();
@@ -238,17 +241,22 @@ pub fn cascade_dispatch_system<A: HmrSource>(
             .unwrap_or_default();
 
         refresh_evts.write(crate::refresh::ConfigRefresh {
+            asset_id: parent_untyped,
             new_config,
             target_entities,
             changed_ids: Default::default(), // empty = cascade marker
+            delta: Default::default(),
             diff_kind: crate::refresh::DiffKind::Modified,
+            cause: crate::refresh::RefreshCause::Dependency {
+                triggered_by: triggered_by.clone(),
+            },
             source_path,
         });
 
         bevy::log::info!(
             "[HMR] cascade: parent={} triggered by child={:?}",
             std::any::type_name::<A>(),
-            parent_untyped,
+            triggered_by,
         );
     }
 }

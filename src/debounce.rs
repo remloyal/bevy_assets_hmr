@@ -21,7 +21,7 @@
 use crate::binding::HandleEntityCache;
 use crate::core::{HmrSource, LastSnapshot};
 use crate::diff::ConfigDiff;
-use crate::refresh::{ConfigRefresh, ConfigRemoved, DiffKind};
+use crate::refresh::{ConfigDelta, ConfigRefresh, ConfigRemoved, DiffKind, RefreshCause};
 use bevy::asset::{AssetId, Assets};
 use bevy::ecs::message::MessageWriter;
 use bevy::prelude::{Res, ResMut, Resource};
@@ -140,6 +140,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 .unwrap_or_default();
 
             removed_evts.write(ConfigRemoved {
+                asset_id: id.untyped(),
                 target_entities,
                 source_path,
                 _marker: std::marker::PhantomData,
@@ -151,7 +152,13 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             // missing child. ----
             let parents = graph.parents_of(id.untyped());
             for (parent_untyped, parent_type) in parents {
-                cascade_queue.pending.push((parent_untyped, parent_type));
+                cascade_queue
+                    .pending
+                    .push(crate::dependency::CascadeRequest {
+                        parent_id: parent_untyped,
+                        parent_type,
+                        triggered_by: id.untyped(),
+                    });
             }
         }
     }
@@ -180,14 +187,18 @@ pub fn flush_debounced_refresh<A: HmrSource>(
 
             let new_raw = new_asset.config();
 
-            let (changed_ids, diff_kind) = match snapshots.map.get(&id) {
+            let (delta, diff_kind) = match snapshots.map.get(&id) {
                 Some(old_raw) => {
                     let (added, removed, modified) = A::Config::diff(old_raw, new_raw);
                     let kind = DiffKind::from_counts(added.len(), removed.len(), modified.len());
-                    let mut ids = added;
-                    ids.extend(removed);
-                    ids.extend(modified);
-                    (ids, kind)
+                    (
+                        ConfigDelta {
+                            added,
+                            removed,
+                            modified,
+                        },
+                        kind,
+                    )
                 }
                 None => {
                     // First load: initialize the snapshot and skip dispatch.
@@ -207,9 +218,11 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 .insert(id, new_asset.source_path().to_string());
 
             // Skip dispatch if nothing actually changed (e.g. same content re-inserted).
-            if changed_ids.is_empty() {
+            if delta.is_empty() {
                 continue;
             }
+
+            let changed_ids = delta.changed_ids();
 
             // Collect target_entities from the cache (may be empty for the
             // data-table-via-Resource pattern).
@@ -222,10 +235,13 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             let entity_count = target_entities.len();
 
             refresh_evts.write(ConfigRefresh {
+                asset_id: id.untyped(),
                 new_config: new_raw.clone(),
                 target_entities,
                 changed_ids,
+                delta,
                 diff_kind,
+                cause: RefreshCause::Direct,
                 source_path: new_asset.source_path().to_string(),
             });
 
@@ -233,7 +249,13 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             // get re-dispatched on the next frame. ----
             let parents = graph.parents_of(id.untyped());
             for (parent_untyped, parent_type) in parents {
-                cascade_queue.pending.push((parent_untyped, parent_type));
+                cascade_queue
+                    .pending
+                    .push(crate::dependency::CascadeRequest {
+                        parent_id: parent_untyped,
+                        parent_type,
+                        triggered_by: id.untyped(),
+                    });
             }
 
             // info 日志：路径 + changed_ids 数 + 关联实体数

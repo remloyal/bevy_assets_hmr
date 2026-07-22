@@ -7,21 +7,21 @@
 //! - `derive(Asset)` auto-generates `VisitAssetDependencies` that visits
 //!   `#[dependency]` fields
 //! - When the child asset is modified (frame 5), the parent subscriber
-//!   receives a `ConfigRefresh<ParentDb>` with empty `changed_ids` (cascade
-//!   marker)
+//!   receives a `ConfigRefresh<ParentDb>` with `RefreshCause::Dependency`
 //! - When the child asset is removed (frame 9), the parent subscriber
 //!   also receives a cascade `ConfigRefresh` so it can clean up derived
 //!   state
 //!
 //! Watch the stdout for the `on_parent_refresh` system to distinguish
-//! between cascade events (empty `changed_ids`) and self-modification
-//! events.
+//! between dependency cascade and direct self-modification events.
 
 use bevy::asset::{Asset, AssetId, Assets, Handle};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy_assets_hmr::{ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh, HmrSource};
+use bevy_assets_hmr::{
+    ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh, HmrSource, RefreshCause,
+};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -60,8 +60,7 @@ struct ParentDb {
     items: Vec<ParentItem>,
     /// Marks this `Handle<ChildDb>` field as a tracked dependency.
     /// Modifying or removing `ChildDb` will cascade a
-    /// `ConfigRefresh<ParentDb>` (with empty `changed_ids`) to this
-    /// parent's subscribers.
+    /// dependency-caused `ConfigRefresh<ParentDb>` to this parent.
     #[dependency]
     child_handle: Handle<ChildDb>,
 }
@@ -81,14 +80,13 @@ impl HmrSource for ParentDb {
     }
 }
 
-/// Subscriber: prints whether the refresh is a cascade (empty
-/// `changed_ids`) or a real change.
+/// Subscriber: prints whether the refresh is a dependency cascade or a
+/// direct change.
 fn on_parent_refresh(mut reader: MessageReader<ConfigRefresh<ParentDb>>) {
     for refresh in reader.read() {
-        let kind = if refresh.changed_ids.is_empty() {
-            "CASCADE (child modified or removed)"
-        } else {
-            "SELF-CHANGE"
+        let kind = match &refresh.cause {
+            RefreshCause::Dependency { .. } => "CASCADE (child modified or removed)",
+            _ => "SELF-CHANGE",
         };
         println!(
             "\n[ConfigRefresh<ParentDb>] {kind}\n  source_path: {:?}\n  changed_ids: {:?}\n  new_config: {:?}",

@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy_assets_hmr::{
     ConfigAsset, ConfigBind, ConfigDiff, ConfigHmrAppExt, ConfigHmrPlugin, ConfigRefresh,
-    ConfigReloadFailed, ConfigRemoved, HandleEntityCache, HmrSource, LastSnapshot,
+    ConfigReloadFailed, ConfigRemoved, HandleEntityCache, HmrSource, LastSnapshot, RefreshCause,
     RefreshDebouncer,
 };
 // 注：`ConfigRefresh<TestDb>` 的泛型是 Config 类型（`ConfigAsset<TestDb>::Config = TestDb`），
@@ -243,6 +243,11 @@ fn modified_event_with_prior_snapshot_dispatches_refresh_with_changed_ids() {
         ],
         "changed_ids should match added+modified+removed"
     );
+    assert_eq!(captured.asset_id, asset_id.untyped());
+    assert_eq!(captured.delta.added, ["add".to_string()].into());
+    assert_eq!(captured.delta.removed, ["remove".to_string()].into());
+    assert_eq!(captured.delta.modified, ["modify".to_string()].into());
+    assert_eq!(captured.cause, RefreshCause::Direct);
 
     let snapshot = app.world().resource::<LastSnapshot<ConfigAsset<TestDb>>>();
     let stored = snapshot.map.get(&asset_id).expect("snapshot should exist");
@@ -254,6 +259,91 @@ fn modified_event_with_prior_snapshot_dispatches_refresh_with_changed_ids() {
     assert_eq!(
         captured.source_path, "data/test.ron",
         "ConfigRefresh should carry the asset's source_path"
+    );
+}
+
+#[derive(Resource, Default)]
+struct CapturedRefreshes(Vec<ConfigRefresh<TestDb>>);
+
+fn capture_all_refreshes_system(
+    mut reader: MessageReader<ConfigRefresh<TestDb>>,
+    mut captured: ResMut<CapturedRefreshes>,
+) {
+    captured.0.extend(reader.read().cloned());
+}
+
+#[test]
+fn same_config_type_multiple_assets_keep_distinct_asset_ids() {
+    let mut app = make_app(Duration::from_millis(0));
+    app.insert_resource(CapturedRefreshes::default());
+    app.add_systems(Update, capture_all_refreshes_system);
+    let first_id = make_id(210);
+    let second_id = make_id(211);
+
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        for (id, path) in [(first_id, "data/first.ron"), (second_id, "data/second.ron")] {
+            let _ = assets.insert(
+                id,
+                ConfigAsset {
+                    raw: TestDb {
+                        items: vec![Item {
+                            id: "entry".into(),
+                            n: 1,
+                        }],
+                    },
+                    source_path: path.into(),
+                },
+            );
+        }
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    app.world_mut()
+        .resource_mut::<CapturedRefreshes>()
+        .0
+        .clear();
+
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        for (id, path, value) in [
+            (first_id, "data/first.ron", 2),
+            (second_id, "data/second.ron", 3),
+        ] {
+            let _ = assets.insert(
+                id,
+                ConfigAsset {
+                    raw: TestDb {
+                        items: vec![Item {
+                            id: "entry".into(),
+                            n: value,
+                        }],
+                    },
+                    source_path: path.into(),
+                },
+            );
+        }
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let captured = &app.world().resource::<CapturedRefreshes>().0;
+    assert_eq!(captured.len(), 2);
+    assert!(
+        captured
+            .iter()
+            .any(|event| event.asset_id == first_id.untyped())
+    );
+    assert!(
+        captured
+            .iter()
+            .any(|event| event.asset_id == second_id.untyped())
     );
 }
 
@@ -517,6 +607,7 @@ fn removed_asset_dispatches_config_removed_with_source_path() {
         captured.source_path, "data/deleted.ron",
         "ConfigRemoved should carry the source_path recorded before removal"
     );
+    assert_eq!(captured.asset_id, asset_id.untyped());
 
     // The snapshot must be cleaned up.
     let snapshot = app.world().resource::<LastSnapshot<ConfigAsset<TestDb>>>();
@@ -1486,6 +1577,16 @@ fn cascade_triggers_config_refresh_on_parent() {
         evt.changed_ids.is_empty(),
         "cascade-fired ConfigRefresh should have empty changed_ids"
     );
+    assert_eq!(evt.asset_id, parent_id.untyped());
+    match &evt.cause {
+        RefreshCause::Dependency { triggered_by } => {
+            assert_eq!(
+                triggered_by,
+                &[actual_child_id.untyped()].into_iter().collect()
+            );
+        }
+        cause => panic!("expected dependency cause, got {cause:?}"),
+    }
     // Direct-mode HmrSource returns "" for source_path, so the cascade
     // event also has an empty path. The important part is that the event
     // fired with the parent's current value.
@@ -1628,4 +1729,14 @@ fn cascade_triggers_on_child_removed() {
         evt.changed_ids.is_empty(),
         "removal cascade should also have empty changed_ids"
     );
+    assert_eq!(evt.asset_id, parent_id.untyped());
+    match &evt.cause {
+        RefreshCause::Dependency { triggered_by } => {
+            assert_eq!(
+                triggered_by,
+                &[actual_child_id.untyped()].into_iter().collect()
+            );
+        }
+        cause => panic!("expected dependency cause, got {cause:?}"),
+    }
 }
