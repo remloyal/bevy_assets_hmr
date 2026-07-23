@@ -1846,3 +1846,85 @@ fn cascade_triggers_on_child_removed() {
         cause => panic!("expected dependency cause, got {cause:?}"),
     }
 }
+
+#[test]
+fn cascade_triggers_on_child_load_failure() {
+    let mut app = make_cascade_app(Duration::from_millis(0));
+    app.insert_resource(CapturedParentRefresh::default());
+    app.add_systems(Update, capture_parent_refresh_system);
+
+    let child_handle = insert_child_and_handle(
+        &mut app,
+        ChildDb {
+            items: vec![ChildItem {
+                id: "c1".into(),
+                v: 1,
+            }],
+        },
+    );
+    let actual_child_id = child_handle.id();
+    let parent_id = AssetId::<ParentDb>::Uuid {
+        uuid: Uuid::from_u128(1501),
+    };
+    {
+        let mut parent_assets = app.world_mut().resource_mut::<Assets<ParentDb>>();
+        let _ = parent_assets.insert(
+            parent_id,
+            ParentDb {
+                items: vec![ParentItem { id: "p1".into() }],
+                child_handle: child_handle.clone(),
+            },
+        );
+    }
+
+    // Build the dependency graph and initialize the child snapshot first.
+    for _ in 0..10 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<CapturedParentRefresh>().0 = None;
+
+    app.world_mut()
+        .resource_mut::<Messages<AssetLoadFailedEvent<ChildDb>>>()
+        .write(AssetLoadFailedEvent {
+            id: actual_child_id,
+            path: AssetPath::from("data/child.ron"),
+            error: AssetLoadError::EmptyPath(AssetPath::from("")),
+        });
+    for _ in 0..10 {
+        app.update();
+    }
+
+    let captured = app.world().resource::<CapturedParentRefresh>();
+    let evt = captured
+        .0
+        .as_ref()
+        .expect("child load failure should cascade to the parent");
+    assert_eq!(evt.asset_id, parent_id.untyped());
+    match &evt.cause {
+        RefreshCause::Dependency { triggered_by } => {
+            assert_eq!(
+                triggered_by,
+                &[actual_child_id.untyped()].into_iter().collect()
+            );
+        }
+        cause => panic!("expected dependency cause, got {cause:?}"),
+    }
+
+    app.world_mut().resource_mut::<CapturedParentRefresh>().0 = None;
+    let _ = app.world_mut().resource_mut::<Assets<ChildDb>>().insert(
+        actual_child_id,
+        ChildDb {
+            items: vec![ChildItem {
+                id: "c1".into(),
+                v: 1,
+            }],
+        },
+    );
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<CapturedParentRefresh>().0.is_some(),
+        "child recovery should also cascade to the parent"
+    );
+}

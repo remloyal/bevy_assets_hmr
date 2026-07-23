@@ -130,6 +130,8 @@ pub fn asset_load_failed_system<A: HmrSource>(
     cache: Res<HandleEntityCache<A>>,
     mut revisions: ResMut<crate::view::AssetRevision<A>>,
     mut failed_messages: MessageWriter<crate::refresh::ConfigReloadFailed<A::Config>>,
+    graph: Res<crate::dependency::DependencyGraph>,
+    mut cascade_queue: ResMut<crate::dependency::CascadeQueue>,
 ) {
     for failure in failures.read() {
         let current_config = snapshots.map.get(&failure.id).cloned();
@@ -153,6 +155,17 @@ pub fn asset_load_failed_system<A: HmrSource>(
             target_entities,
             current_config,
         });
+
+        // A failed child still changes the validity of any parent-derived
+        // state. Keep the last valid child asset in Bevy, but notify parents
+        // through the same business dependency cascade used for removal.
+        for (parent_untyped, parent_type) in graph.parents_of(failure.id.untyped()) {
+            cascade_queue.enqueue(crate::dependency::CascadeRequest {
+                parent_id: parent_untyped,
+                parent_type,
+                triggered_by: failure.id.untyped(),
+            });
+        }
     }
 }
 

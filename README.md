@@ -466,6 +466,10 @@ pub struct GameAssets {
 
 当一个父配置通过 `Handle<*>` 字段持有子配置的引用时，修改子配置会自动让父配置订阅方收到一个 `ConfigRefresh<T>`——这让"父配置缓存子配置派生数据"成为可能。
 
+子资产被删除、加载失败或从失败中恢复时也会触发同一条业务级联。加载失败时
+Bevy 仍保留最后有效资产；父订阅方通过级联事件决定继续使用旧派生状态、显示
+降级状态或暂停相关功能。
+
 ### 工作机制
 
 1. **`#[derive(Asset)]`** 自动生成 `VisitAssetDependencies` impl，遍历所有标有 `#[dependency]` 的 `Handle<*>` 字段。
