@@ -238,6 +238,7 @@ pub fn cascade_dispatch_system<A: HmrSource>(
     assets: Res<Assets<A>>,
     cache: Res<crate::binding::HandleEntityCache<A>>,
     mut revisions: ResMut<crate::view::AssetRevision<A>>,
+    mut metrics: ResMut<crate::metrics::HmrMetrics<A>>,
     mut refresh_evts: MessageWriter<crate::refresh::ConfigRefresh<A::Config>>,
     graph: Res<DependencyGraph>,
 ) {
@@ -273,6 +274,7 @@ pub fn cascade_dispatch_system<A: HmrSource>(
             // Parent was removed; nothing to dispatch.
             continue;
         };
+        metrics.record_config_clone(asset.config());
         let new_config = asset.config().clone();
         let source_path = asset.source_path().to_string();
         let target_entities: Vec<bevy::ecs::entity::Entity> = cache
@@ -293,6 +295,7 @@ pub fn cascade_dispatch_system<A: HmrSource>(
             },
             source_path,
         });
+        metrics.cascades_dispatched += 1;
 
         // Continue the wave through grandparents while the queue-level
         // seen set prevents cycles and duplicate root/parent pairs.
@@ -328,6 +331,7 @@ mod tests {
     use crate::asset::ConfigAsset;
     use crate::binding::HandleEntityCache;
     use crate::diff::SimpleConfigDiff;
+    use crate::metrics::HmrMetrics;
     use crate::refresh::ConfigRefresh;
     use crate::view::AssetRevision;
     use bevy::asset::{Asset, AssetId, AssetPlugin, Assets};
@@ -388,6 +392,7 @@ mod tests {
         app.init_asset::<ConfigAsset<QueueConfig>>()
             .init_resource::<HandleEntityCache<ConfigAsset<QueueConfig>>>()
             .init_resource::<AssetRevision<ConfigAsset<QueueConfig>>>()
+            .init_resource::<HmrMetrics<ConfigAsset<QueueConfig>>>()
             .init_resource::<DependencyGraph>()
             .init_resource::<CascadeQueue>()
             .add_message::<ConfigRefresh<QueueConfig>>()

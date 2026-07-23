@@ -51,6 +51,13 @@ pub trait ConfigDiff: Send + Sync + 'static {
     /// when using a non-`String` id type.
     type Id: Eq + Hash + Clone + Send + Sync + std::fmt::Debug + 'static;
 
+    /// Optional estimate of the owned bytes cloned when carrying this config
+    /// through a refresh event. Return `None` when the type has no cheap,
+    /// trustworthy estimate; metrics will count the clone as unestimated.
+    fn estimated_size_bytes(&self) -> Option<usize> {
+        None
+    }
+
     /// Compare two versions of this config and return the id delta.
     ///
     /// - `added`: ids present in `new` but not in `old`

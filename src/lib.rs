@@ -33,6 +33,7 @@ mod dependency;
 mod diff;
 pub mod ext;
 mod loader;
+mod metrics;
 mod refresh;
 mod registry;
 mod view;
@@ -54,7 +55,8 @@ pub use dependency::{
 pub use diff::{ConfigDiff, ConfigDiffResult, SimpleConfigDiff, diff_entries_by_id};
 pub use ext::ConfigHmrAppExt;
 pub use ext::{HmrAutoWatch, HmrAutoWatchPlugin, adopt_handle, take_over_handle};
-pub use loader::ConfigLoader;
+pub use loader::{ConfigLoader, ConfigValidator};
+pub use metrics::HmrMetrics;
 pub use refresh::{
     ConfigDelta, ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind, RefreshCause,
 };

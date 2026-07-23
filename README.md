@@ -462,6 +462,57 @@ pub struct GameAssets {
 7. **自动缓存校验**：每 30 秒自动校验 `HandleEntityCache` 与实际组件的一致性
 8. **自动依赖图 + 级联**：构建跨类型 `Handle<*>` 依赖图，子资产变更自动派发 `ConfigRefresh` 给父资产订阅方，并在 `RefreshCause::Dependency` 中保留触发源
 
+## 配置校验
+
+包装模式可在注册配置后安装类型级 Validator。Validator 在反序列化之后、资产
+替换之前由 `ConfigLoader` 执行；失败会进入 Bevy 的 loader failure 路径，因此
+热重载时仍保留最后一个合法资产。
+
+```rust,ignore
+app.register_config::<NpcDatabase>("data/npc.ron")
+    .register_config_validator::<NpcDatabase, _>(|config| {
+        if config.npcs.iter().any(|npc| npc.id.is_empty()) {
+            Err("npc id must not be empty".into())
+        } else {
+            Ok(())
+        }
+    });
+```
+
+Validator 对同类型的所有注册路径生效。直接模式使用用户自己的 loader，应在该
+loader 内完成等价校验。
+
+## 性能指标与基准
+
+每个注册类型都会初始化 `HmrMetrics<A>`，记录 Diff 次数和耗时、刷新/恢复/
+失败/删除/级联次数，以及完整配置 Clone 次数。对于包含 `Vec`、`String` 等堆
+分配的配置，可注册 owned-size estimator，避免把浅层 `size_of` 误当成真实字节量：
+
+```rust,ignore
+app.register_config::<NpcDatabase>("data/npc.ron")
+    .register_config_size_estimator::<NpcDatabase>(|config| {
+        std::mem::size_of::<NpcDatabase>()
+            + config.npcs.capacity() * std::mem::size_of::<Npc>()
+    });
+
+fn report(metrics: Res<HmrMetrics<ConfigAsset<NpcDatabase>>>) {
+    println!("diffs={}, clones={}, bytes={}",
+        metrics.diff_runs,
+        metrics.config_clone_count,
+        metrics.estimated_clone_bytes,
+    );
+}
+```
+
+运行 `cargo run --example diff_baseline` 可取得 debug 基线；资源允许时使用
+`cargo bench --bench diff_baseline` 取得 release 基线。基准覆盖 1k、10k、
+100k 条目以及连续 10k 条目保存负载。
+
+当前事件载荷评估结论是暂时保留 `ConfigRefresh::new_config`：现有直接模式、
+级联订阅方和示例大量依赖该字段，立即移除会扩大 0.2 的迁移范围。大型配置可
+通过 `HmrMetrics` 判断 Clone 是否成为瓶颈；确认后再将事件收敛为
+`AssetId + delta + revision + cause`，由消费者从 `Assets` 读取当前值。
+
 ## 依赖链级联（`DependencyGraph`）
 
 当一个父配置通过 `Handle<*>` 字段持有子配置的引用时，修改子配置会自动让父配置订阅方收到一个 `ConfigRefresh<T>`——这让"父配置缓存子配置派生数据"成为可能。

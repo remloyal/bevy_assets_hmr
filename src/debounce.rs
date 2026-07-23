@@ -98,6 +98,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
     mut refresh_evts: MessageWriter<ConfigRefresh<A::Config>>,
     mut removed_evts: MessageWriter<ConfigRemoved<A::Config>>,
     mut revisions: ResMut<crate::view::AssetRevision<A>>,
+    mut metrics: ResMut<crate::metrics::HmrMetrics<A>>,
     graph: Res<crate::dependency::DependencyGraph>,
     mut cascade_queue: ResMut<crate::dependency::CascadeQueue>,
 ) {
@@ -149,6 +150,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 source_path,
                 _marker: std::marker::PhantomData,
             });
+            metrics.removals_dispatched += 1;
 
             // ---- Dependency cascade on removal: enqueue this asset's
             // parents so they get re-dispatched on the next frame, so
@@ -196,7 +198,9 @@ pub fn flush_debounced_refresh<A: HmrSource>(
 
             let (delta, diff_kind) = match snapshots.map.get(&id) {
                 Some(old_raw) => {
+                    let diff_started = Instant::now();
                     let (added, removed, modified) = A::Config::diff(old_raw, new_raw);
+                    metrics.record_diff(diff_started.elapsed());
                     let kind = DiffKind::from_counts(added.len(), removed.len(), modified.len());
                     (
                         ConfigDelta {
@@ -210,6 +214,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 None => {
                     // First load: initialize the snapshot and skip dispatch.
                     // Subscribers should not see a spurious "first load" refresh.
+                    metrics.record_config_clone(new_raw);
                     snapshots.map.insert(id, new_raw.clone());
                     snapshots
                         .source_paths
@@ -220,6 +225,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             };
 
             // Update snapshot to the new version (regardless of whether we dispatch).
+            metrics.record_config_clone(new_raw);
             snapshots.map.insert(id, new_raw.clone());
             snapshots
                 .source_paths
@@ -248,6 +254,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             let changed_count = changed_ids.len();
             let entity_count = target_entities.len();
 
+            metrics.record_config_clone(new_raw);
             refresh_evts.write(ConfigRefresh {
                 asset_id: id.untyped(),
                 new_config: new_raw.clone(),
@@ -266,6 +273,10 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 },
                 source_path: new_asset.source_path().to_string(),
             });
+            metrics.refreshes_dispatched += 1;
+            if was_failed {
+                metrics.recoveries_dispatched += 1;
+            }
 
             // ---- Dependency cascade: enqueue this asset's parents so they
             // get re-dispatched on the next frame. ----

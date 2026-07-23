@@ -124,17 +124,22 @@ pub fn hmr_core_system<A: HmrSource>(
 /// Bevy keeps the previously loaded asset when a hot reload fails. The HMR
 /// layer reports the failure and last valid snapshot without writing an
 /// artificial rollback asset back into `Assets<A>`.
+#[allow(clippy::too_many_arguments)]
 pub fn asset_load_failed_system<A: HmrSource>(
     mut failures: MessageReader<AssetLoadFailedEvent<A>>,
     snapshots: Res<LastSnapshot<A>>,
     cache: Res<HandleEntityCache<A>>,
     mut revisions: ResMut<crate::view::AssetRevision<A>>,
+    mut metrics: ResMut<crate::metrics::HmrMetrics<A>>,
     mut failed_messages: MessageWriter<crate::refresh::ConfigReloadFailed<A::Config>>,
     graph: Res<crate::dependency::DependencyGraph>,
     mut cascade_queue: ResMut<crate::dependency::CascadeQueue>,
 ) {
     for failure in failures.read() {
-        let current_config = snapshots.map.get(&failure.id).cloned();
+        let current_config = snapshots.map.get(&failure.id).map(|config| {
+            metrics.record_config_clone(config);
+            config.clone()
+        });
         let source_path = snapshots
             .source_paths
             .get(&failure.id)
@@ -155,6 +160,7 @@ pub fn asset_load_failed_system<A: HmrSource>(
             target_entities,
             current_config,
         });
+        metrics.failures_reported += 1;
 
         // A failed child still changes the validity of any parent-derived
         // state. Keep the last valid child asset in Bevy, but notify parents

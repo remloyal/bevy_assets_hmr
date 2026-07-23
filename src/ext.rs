@@ -22,7 +22,7 @@ use crate::asset::{ConfigAsset, ConfigHandle};
 use crate::binding::HandleEntityCache;
 use crate::core::{HmrAsset, HmrSource, LastSnapshot};
 use crate::debounce::RefreshDebouncer;
-use crate::loader::ConfigLoader;
+use crate::loader::{ConfigLoader, ConfigValidator};
 use crate::refresh::{ConfigRefresh, ConfigReloadFailed, ConfigRemoved};
 use crate::registry::ConfigPathRegistry;
 use bevy::app::App;
@@ -83,6 +83,20 @@ pub trait ConfigHmrAppExt {
     /// // ↑ 这一行就完成了：注册 loader、系统、自动加载文件、持有 handle
     /// ```
     fn register_config<T: HmrAsset>(&mut self, path: &str) -> &mut Self;
+
+    /// Install a semantic validator for a previously registered wrapped
+    /// config type. Validation errors are returned through Bevy's loader
+    /// failure path, so the previous valid asset remains available.
+    fn register_config_validator<T, F>(&mut self, validator: F) -> &mut Self
+    where
+        T: HmrAsset,
+        F: Fn(&T) -> Result<(), String> + Send + Sync + 'static;
+
+    /// Install an owned-size estimator for clone byte metrics.
+    fn register_config_size_estimator<T: HmrAsset>(
+        &mut self,
+        estimator: fn(&T) -> usize,
+    ) -> &mut Self;
 
     /// Register a raw asset type `A` for HMR (直接模式). 适用于用户已用
     /// 自定义 `AssetLoader` 加载的 Asset 类型，不经过 `ConfigAsset<T>` 包装。
@@ -254,6 +268,40 @@ impl ConfigHmrAppExt for App {
         self
     }
 
+    fn register_config_validator<T, F>(&mut self, validator: F) -> &mut Self
+    where
+        T: HmrAsset,
+        F: Fn(&T) -> Result<(), String> + Send + Sync + 'static,
+    {
+        if let Some(mut resource) = self.world_mut().get_resource_mut::<ConfigValidator<T>>() {
+            resource.set(validator);
+        } else {
+            bevy::log::warn!(
+                "[HMR] register_config_validator::<{}> called before register_config",
+                std::any::type_name::<T>()
+            );
+        }
+        self
+    }
+
+    fn register_config_size_estimator<T: HmrAsset>(
+        &mut self,
+        estimator: fn(&T) -> usize,
+    ) -> &mut Self {
+        if let Some(mut metrics) = self
+            .world_mut()
+            .get_resource_mut::<crate::metrics::HmrMetrics<ConfigAsset<T>>>()
+        {
+            metrics.set_size_estimator(estimator);
+        } else {
+            bevy::log::warn!(
+                "[HMR] register_config_size_estimator::<{}> called before register_config",
+                std::any::type_name::<T>()
+            );
+        }
+        self
+    }
+
     fn insert_config<T: HmrAsset>(
         &mut self,
         id: AssetId<ConfigAsset<T>>,
@@ -412,12 +460,15 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
         .unwrap_or_else(|| Duration::from_millis(150));
 
     if !asset_type_installed {
-        app.register_asset_loader(ConfigLoader::<T>::default())
+        let (loader, validator) = ConfigLoader::<T>::with_validator();
+        app.insert_resource(validator)
+            .register_asset_loader(loader)
             .init_asset::<ConfigAsset<T>>()
             .init_asset::<T>()
             .init_resource::<HandleEntityCache<ConfigAsset<T>>>()
             .init_resource::<RefreshDebouncer<ConfigAsset<T>>>()
             .init_resource::<LastSnapshot<ConfigAsset<T>>>()
+            .init_resource::<crate::metrics::HmrMetrics<ConfigAsset<T>>>()
             .init_resource::<crate::view::AssetRevision<ConfigAsset<T>>>()
             .add_message::<ConfigRefresh<T>>()
             .add_message::<ConfigRemoved<T>>()
@@ -490,6 +541,7 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
         app.init_resource::<HandleEntityCache<A>>()
             .init_resource::<RefreshDebouncer<A>>()
             .init_resource::<LastSnapshot<A>>()
+            .init_resource::<crate::metrics::HmrMetrics<A>>()
             .init_resource::<crate::view::AssetRevision<A>>()
             .add_message::<ConfigRefresh<A::Config>>()
             .add_message::<ConfigRemoved<A::Config>>()

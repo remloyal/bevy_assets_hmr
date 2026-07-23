@@ -69,6 +69,14 @@ path = "examples/viewer.rs"
 name = "asset_loader_viewer"
 path = "examples/asset_loader_viewer.rs"
 
+[[bench]]
+name = "diff_baseline"
+harness = false
+
+[[example]]
+name = "diff_baseline"
+path = "examples/diff_baseline.rs"
+
 # HMR 文件监听由消费方启用 `bevy/file_watcher` feature 实现（bevy 0.19
 # 依赖 notify-debouncer-full ^0.7.0，现已可用）。本 crate 只负责
 # diff + 派发 ConfigRefresh，不直接监听文件。

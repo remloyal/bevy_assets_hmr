@@ -2,10 +2,46 @@
 
 use crate::asset::ConfigAsset;
 use bevy::asset::{Asset, AssetLoader, LoadContext, io::Reader};
+use bevy::prelude::Resource;
 use bevy::reflect::TypePath;
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+type Validator<T> = Arc<dyn Fn(&T) -> Result<(), String> + Send + Sync + 'static>;
+
+/// Runtime validator shared by a config loader and its app resource.
+#[derive(Resource, Clone)]
+pub struct ConfigValidator<T> {
+    callback: Arc<RwLock<Option<Validator<T>>>>,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> ConfigValidator<T> {
+    pub(crate) fn with_shared(callback: Arc<RwLock<Option<Validator<T>>>>) -> Self {
+        Self {
+            callback,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Install or replace the validation callback.
+    pub fn set<F>(&mut self, validator: F)
+    where
+        F: Fn(&T) -> Result<(), String> + Send + Sync + 'static,
+    {
+        if let Ok(mut callback) = self.callback.write() {
+            *callback = Some(Arc::new(validator));
+        }
+    }
+
+    /// Remove the current validation callback.
+    pub fn clear(&mut self) {
+        if let Ok(mut callback) = self.callback.write() {
+            *callback = None;
+        }
+    }
+}
 
 /// Generic loader for [`ConfigAsset<T>`]. Dispatches on file extension to
 /// either `ron::from_bytes` or `serde_json::from_slice`.
@@ -15,14 +51,31 @@ use std::sync::Arc;
 /// via [`crate::ConfigHmrAppExt::register_config`].
 #[derive(TypePath)]
 pub struct ConfigLoader<T> {
+    validator: Arc<RwLock<Option<Validator<T>>>>,
     _marker: PhantomData<T>,
 }
 
 impl<T> Default for ConfigLoader<T> {
     fn default() -> Self {
+        let validator = Arc::new(RwLock::new(None));
         Self {
+            validator,
             _marker: PhantomData,
         }
+    }
+}
+
+impl<T> ConfigLoader<T> {
+    /// Construct a loader and the matching runtime validator resource.
+    pub(crate) fn with_validator() -> (Self, ConfigValidator<T>) {
+        let shared = Arc::new(RwLock::new(None));
+        (
+            Self {
+                validator: shared.clone(),
+                _marker: PhantomData,
+            },
+            ConfigValidator::with_shared(shared),
+        )
     }
 }
 
@@ -37,6 +90,8 @@ pub enum ConfigLoaderError {
     Json(#[from] serde_json::Error),
     #[error("unsupported file extension: {0}")]
     UnsupportedExtension(String),
+    #[error("config validation error: {0}")]
+    Validation(String),
 }
 
 impl<T: Asset + DeserializeOwned + Send + Sync + 'static> AssetLoader for ConfigLoader<T> {
@@ -76,6 +131,15 @@ impl<T: Asset + DeserializeOwned + Send + Sync + 'static> AssetLoader for Config
                 )));
             }
         };
+
+        let validator = self
+            .validator
+            .read()
+            .ok()
+            .and_then(|callback| callback.clone());
+        if let Some(validator) = validator {
+            validator(&raw).map_err(|error| Arc::new(ConfigLoaderError::Validation(error)))?;
+        }
 
         Ok(ConfigAsset {
             raw,

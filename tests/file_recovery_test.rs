@@ -224,3 +224,47 @@ fn temporary_file_rename_replacement_applies_final_asset_without_removal() {
         2
     );
 }
+
+#[test]
+fn semantic_validator_uses_loader_failure_path_and_retains_last_valid_asset() {
+    let mut fixture = create_fixture(
+        "(items: [(id: \"same\", n: 1)])\n",
+        Duration::from_millis(0),
+    );
+    let asset_id = fixture.asset_id;
+    fixture
+        .app
+        .register_config_validator::<RecoveryDb, _>(|config| {
+            if config.items.iter().any(|item| item.n == 0) {
+                Err("item value must be non-zero".into())
+            } else {
+                Ok(())
+            }
+        });
+
+    fs::write(&fixture.asset_path, "(items: [(id: \"same\", n: 0)])\n")
+        .expect("write semantically invalid asset");
+    assert!(update_until(
+        &mut fixture.app,
+        Duration::from_secs(5),
+        |world| {
+            world.resource::<Captured>().failures.iter().any(|event| {
+                event.asset_id == asset_id.untyped()
+                    && event.error.contains("config validation error")
+                    && event.error.contains("non-zero")
+            })
+        }
+    ));
+    assert_eq!(
+        fixture
+            .app
+            .world()
+            .resource::<Assets<ConfigAsset<RecoveryDb>>>()
+            .get(asset_id)
+            .expect("Bevy should retain the last valid asset")
+            .raw
+            .items[0]
+            .n,
+        1
+    );
+}

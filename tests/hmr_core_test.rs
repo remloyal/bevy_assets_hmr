@@ -18,8 +18,8 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy_assets_hmr::{
     ConfigAsset, ConfigBind, ConfigDiff, ConfigHandle, ConfigHmrAppExt, ConfigHmrPlugin,
-    ConfigRefresh, ConfigReloadFailed, ConfigRemoved, HandleEntityCache, HmrSource, LastSnapshot,
-    RefreshCause, RefreshDebouncer,
+    ConfigRefresh, ConfigReloadFailed, ConfigRemoved, HandleEntityCache, HmrMetrics, HmrSource,
+    LastSnapshot, RefreshCause, RefreshDebouncer,
 };
 // 注：`ConfigRefresh<TestDb>` 的泛型是 Config 类型（`ConfigAsset<TestDb>::Config = TestDb`），
 // 所以仍是 `ConfigRefresh<TestDb>`。`RefreshDebouncer` / `LastSnapshot` 的泛型是
@@ -45,6 +45,16 @@ impl TestDb {
     fn lookup(&self, id: &str) -> Option<&Item> {
         self.items.iter().find(|i| i.id == id)
     }
+}
+
+fn estimate_test_db_bytes(config: &TestDb) -> usize {
+    std::mem::size_of::<TestDb>()
+        + config.items.capacity() * std::mem::size_of::<Item>()
+        + config
+            .items
+            .iter()
+            .map(|item| item.id.capacity())
+            .sum::<usize>()
 }
 
 #[derive(Resource, Default)]
@@ -259,6 +269,71 @@ fn modified_event_with_prior_snapshot_dispatches_refresh_with_changed_ids() {
     assert_eq!(
         captured.source_path, "data/test.ron",
         "ConfigRefresh should carry the asset's source_path"
+    );
+}
+
+#[test]
+fn refresh_metrics_report_diff_time_and_config_clone_pressure() {
+    let mut app = make_app(Duration::from_millis(0));
+    let asset_id = make_id(205);
+    {
+        let mut assets = app
+            .world_mut()
+            .resource_mut::<Assets<ConfigAsset<TestDb>>>();
+        let _ = assets.insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "entry".into(),
+                        n: 1,
+                    }],
+                },
+                source_path: "data/metrics.ron".into(),
+            },
+        );
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    *app.world_mut()
+        .resource_mut::<HmrMetrics<ConfigAsset<TestDb>>>() = HmrMetrics::default();
+    app.register_config_size_estimator::<TestDb>(estimate_test_db_bytes);
+
+    let _ = app
+        .world_mut()
+        .resource_mut::<Assets<ConfigAsset<TestDb>>>()
+        .insert(
+            asset_id,
+            ConfigAsset {
+                raw: TestDb {
+                    items: vec![Item {
+                        id: "entry".into(),
+                        n: 2,
+                    }],
+                },
+                source_path: "data/metrics.ron".into(),
+            },
+        );
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let metrics = app.world().resource::<HmrMetrics<ConfigAsset<TestDb>>>();
+    assert_eq!(metrics.diff_runs, 1);
+    assert_eq!(metrics.refreshes_dispatched, 1);
+    assert!(metrics.total_diff_time_ns > 0);
+    assert_eq!(metrics.config_clone_count, 2);
+    assert_eq!(metrics.unestimated_clone_count, 0);
+    let refreshed = TestDb {
+        items: vec![Item {
+            id: "entry".into(),
+            n: 2,
+        }],
+    };
+    assert_eq!(
+        metrics.estimated_clone_bytes,
+        (2 * estimate_test_db_bytes(&refreshed)) as u64
     );
 }
 
