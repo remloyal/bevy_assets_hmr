@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Derive macros for bevy_assets_hmr"
 license = "MIT"
+repository = "https://github.com/remloyal/bevy_assets_hmr"
 
 [lib]
 proc-macro = true
