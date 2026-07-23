@@ -509,7 +509,7 @@ fn report(metrics: Res<HmrMetrics<ConfigAsset<NpcDatabase>>>) {
 100k 条目以及连续 10k 条目保存负载。
 
 当前事件载荷评估结论是暂时保留 `ConfigRefresh::new_config`：现有直接模式、
-级联订阅方和示例大量依赖该字段，立即移除会扩大 0.2 的迁移范围。大型配置可
+级联订阅方和示例大量依赖该字段，立即移除会扩大首发版本的迁移范围。大型配置可
 通过 `HmrMetrics` 判断 Clone 是否成为瓶颈；确认后再将事件收敛为
 `AssetId + delta + revision + cause`，由消费者从 `Assets` 读取当前值。
 

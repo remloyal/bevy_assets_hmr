@@ -1,6 +1,6 @@
 [package]
 name = "bevy_assets_hmr"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 description = "Generic HMR framework for Bevy 0.19 — hot-reload ron/json configs with targeted refresh"
 license = "MIT"
