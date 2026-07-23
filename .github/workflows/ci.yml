@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.mode }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            mode: default
+          - os: windows-latest
+            mode: default
+          - os: ubuntu-latest
+            mode: no-default
+          - os: windows-latest
+            mode: no-default
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.mode }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.mode }}-
+
+      - name: Test default features
+        if: matrix.mode == 'default'
+        run: cargo test --all-targets --locked
+
+      - name: Check without default features
+        if: matrix.mode == 'no-default'
+        run: cargo check --no-default-features --all-targets --locked
