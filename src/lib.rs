@@ -48,7 +48,7 @@ pub use core::{
 };
 pub use debounce::{RefreshDebouncer, flush_debounced_refresh};
 pub use dependency::{
-    CascadeQueue, CascadeRequest, DependencyGraph, cascade_dispatch_system,
+    CascadeQueue, CascadeRequest, DependencyGraph, MAX_CASCADE_DEPTH, cascade_dispatch_system,
     dependency_cleanup_system, dependency_registry_system,
 };
 pub use diff::{ConfigDiff, ConfigDiffResult, SimpleConfigDiff, diff_entries_by_id};

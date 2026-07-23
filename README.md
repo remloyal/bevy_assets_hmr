@@ -471,7 +471,12 @@ pub struct GameAssets {
 1. **`#[derive(Asset)]`** 自动生成 `VisitAssetDependencies` impl，遍历所有标有 `#[dependency]` 的 `Handle<*>` 字段。
 2. **`dependency_registry_system<A>`**（注册在 `flush_debounced_refresh` 之后）每次 `AssetEvent<A>::Added/Modified` 时重建该资产在 `DependencyGraph` 中的边。
 3. **`flush_debounced_refresh<A>`**（修改后）在派发 `ConfigRefresh` 后，查询图找出此资产的所有父资产，推入 `CascadeQueue.pending`。
-4. **`cascade_dispatch_system<A>`**（每类型，链末尾）排空 `CascadeQueue` 中匹配当前类型的条目，为每个父资产派发一次 `ConfigRefresh<A::Config>`，并合并本帧所有 `triggered_by` 子资产。
+4. **`cascade_dispatch_system<A>`**（每类型，链末尾）排空 `CascadeQueue` 中匹配当前类型的条目，为每个父资产派发一次 `ConfigRefresh<A::Config>`，并合并本帧所有 `triggered_by` 子资产；级联会继续向祖父资产传播，但同一根触发源的深度最多 32 层，循环依赖会被 visited 集合截断。
+
+Bevy 的 loader dependency 和本插件的业务依赖是两个层次：loader dependency 负责
+`AssetServer` 在文件重载时重新加载底层资产；只有配置资产中显式标记
+`#[dependency]` 的 Handle 才会进入本插件的 `DependencyGraph`，并触发业务层
+`ConfigRefresh` 级联。插件不会从 Bevy loader 的内部依赖信息推断业务刷新关系。
 
 ### 订阅方语义
 
@@ -527,7 +532,7 @@ app.add_plugins(ConfigHmrPlugin::default())
 | 符号 | 说明 |
 |---|---|
 | `DependencyGraph` | Resource：`UntypedAssetId -> Vec<(parent_untyped, parent TypeId)>` |
-| `CascadeQueue` | Resource：包含 parent、类型与 `triggered_by` 的待级联请求 |
+| `CascadeQueue` | Resource：包含 parent、类型与 `triggered_by` 的待级联请求；带重复请求去重和 32 层深度上限 |
 | `dependency_registry_system<A>` | 系统：从 `AssetEvent<A>::Added/Modified` 重建依赖边 |
 | `dependency_cleanup_system<A>` | 系统：从 `AssetEvent<A>::Removed` 清理边 |
 | `cascade_dispatch_system<A>` | 系统：派发级联 `ConfigRefresh<A::Config>`（下帧执行） |

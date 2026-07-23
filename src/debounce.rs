@@ -156,13 +156,11 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             // missing child. ----
             let parents = graph.parents_of(id.untyped());
             for (parent_untyped, parent_type) in parents {
-                cascade_queue
-                    .pending
-                    .push(crate::dependency::CascadeRequest {
-                        parent_id: parent_untyped,
-                        parent_type,
-                        triggered_by: id.untyped(),
-                    });
+                cascade_queue.enqueue(crate::dependency::CascadeRequest {
+                    parent_id: parent_untyped,
+                    parent_type,
+                    triggered_by: id.untyped(),
+                });
             }
         }
     }
@@ -273,13 +271,11 @@ pub fn flush_debounced_refresh<A: HmrSource>(
             // get re-dispatched on the next frame. ----
             let parents = graph.parents_of(id.untyped());
             for (parent_untyped, parent_type) in parents {
-                cascade_queue
-                    .pending
-                    .push(crate::dependency::CascadeRequest {
-                        parent_id: parent_untyped,
-                        parent_type,
-                        triggered_by: id.untyped(),
-                    });
+                cascade_queue.enqueue(crate::dependency::CascadeRequest {
+                    parent_id: parent_untyped,
+                    parent_type,
+                    triggered_by: id.untyped(),
+                });
             }
 
             // info 日志：路径 + changed_ids 数 + 关联实体数

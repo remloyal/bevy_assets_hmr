@@ -73,6 +73,42 @@ pub struct DependencyGraph {
 pub struct CascadeQueue {
     /// Requests pending cascade dispatch.
     pub pending: Vec<CascadeRequest>,
+    /// Parent/root pairs already accepted during the current cascade wave.
+    /// This prevents cycles from enqueueing the same logical refresh forever.
+    #[doc(hidden)]
+    pub(crate) seen: HashSet<(UntypedAssetId, UntypedAssetId)>,
+    #[doc(hidden)]
+    pub(crate) depths: HashMap<(UntypedAssetId, UntypedAssetId), usize>,
+}
+
+/// Maximum number of dependency edges traversed for one cascade wave.
+pub const MAX_CASCADE_DEPTH: usize = 32;
+
+impl CascadeQueue {
+    /// Enqueue a direct child-triggered request if it has not already been
+    /// accepted in this cascade wave.
+    pub fn enqueue(&mut self, request: CascadeRequest) {
+        // The root asset has already been refreshed directly. Mark it as
+        // visited so a cycle cannot cascade back into the origin.
+        self.seen
+            .insert((request.triggered_by, request.triggered_by));
+        self.enqueue_at_depth(request, 0);
+    }
+
+    fn enqueue_at_depth(&mut self, request: CascadeRequest, depth: usize) {
+        if depth >= MAX_CASCADE_DEPTH {
+            bevy::log::warn!(
+                "[HMR] dependency cascade depth limit reached at parent={:?}",
+                request.parent_id
+            );
+            return;
+        }
+        let key = (request.parent_id, request.triggered_by);
+        if self.seen.insert(key) {
+            self.depths.insert(key, depth);
+            self.pending.push(request);
+        }
+    }
 }
 
 /// One dependency-triggered parent refresh request.
@@ -203,6 +239,7 @@ pub fn cascade_dispatch_system<A: HmrSource>(
     cache: Res<crate::binding::HandleEntityCache<A>>,
     mut revisions: ResMut<crate::view::AssetRevision<A>>,
     mut refresh_evts: MessageWriter<crate::refresh::ConfigRefresh<A::Config>>,
+    graph: Res<DependencyGraph>,
 ) {
     if queue.pending.is_empty() {
         return;
@@ -213,13 +250,15 @@ pub fn cascade_dispatch_system<A: HmrSource>(
     // frame (e.g. via both the removed- and modified-cascade paths) only
     // receives a single `ConfigRefresh`.
     let mut kept = Vec::new();
-    let mut to_dispatch: HashMap<UntypedAssetId, HashSet<UntypedAssetId>> = HashMap::new();
-    for entry in queue.pending.drain(..) {
+    let mut to_dispatch: HashMap<UntypedAssetId, HashMap<UntypedAssetId, usize>> = HashMap::new();
+    for entry in std::mem::take(&mut queue.pending) {
         if entry.parent_type == target_type {
+            let key = (entry.parent_id, entry.triggered_by);
+            let depth = queue.depths.remove(&key).unwrap_or_default();
             to_dispatch
                 .entry(entry.parent_id)
                 .or_default()
-                .insert(entry.triggered_by);
+                .insert(entry.triggered_by, depth);
         } else {
             kept.push(entry);
         }
@@ -250,15 +289,156 @@ pub fn cascade_dispatch_system<A: HmrSource>(
             delta: Default::default(),
             diff_kind: crate::refresh::DiffKind::Modified,
             cause: crate::refresh::RefreshCause::Dependency {
-                triggered_by: triggered_by.clone(),
+                triggered_by: triggered_by.keys().copied().collect(),
             },
             source_path,
         });
 
+        // Continue the wave through grandparents while the queue-level
+        // seen set prevents cycles and duplicate root/parent pairs.
+        for (&root, &depth) in &triggered_by {
+            for (grandparent_untyped, grandparent_type) in graph.parents_of(parent_untyped) {
+                queue.enqueue_at_depth(
+                    CascadeRequest {
+                        parent_id: grandparent_untyped,
+                        parent_type: grandparent_type,
+                        triggered_by: root,
+                    },
+                    depth + 1,
+                );
+            }
+        }
+
         bevy::log::info!(
             "[HMR] cascade: parent={} triggered by child={:?}",
             std::any::type_name::<A>(),
-            triggered_by,
+            triggered_by.keys().copied().collect::<HashSet<_>>(),
         );
+    }
+
+    if queue.pending.is_empty() {
+        queue.seen.clear();
+        queue.depths.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asset::ConfigAsset;
+    use crate::binding::HandleEntityCache;
+    use crate::diff::SimpleConfigDiff;
+    use crate::refresh::ConfigRefresh;
+    use crate::view::AssetRevision;
+    use bevy::asset::{Asset, AssetId, AssetPlugin, Assets};
+    use bevy::prelude::{
+        App, AssetApp, IntoScheduleConfigs, MessageReader, ResMut, Resource, TypePath, Update,
+    };
+    use serde::{Deserialize, Serialize};
+    use uuid::Uuid;
+
+    #[derive(Asset, TypePath, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+    struct QueueConfig {
+        value: u32,
+    }
+
+    impl SimpleConfigDiff for QueueConfig {}
+
+    #[derive(Resource, Default)]
+    struct Captured(Vec<ConfigRefresh<QueueConfig>>);
+
+    fn capture(
+        mut reader: MessageReader<ConfigRefresh<QueueConfig>>,
+        mut captured: ResMut<Captured>,
+    ) {
+        captured.0.extend(reader.read().cloned());
+    }
+
+    fn id(seed: u128) -> AssetId<ConfigAsset<QueueConfig>> {
+        AssetId::Uuid {
+            uuid: Uuid::from_u128(seed),
+        }
+    }
+
+    #[test]
+    fn direct_requests_deduplicate_by_parent_and_root() {
+        let mut queue = CascadeQueue::default();
+        let child = id(1).untyped();
+        let parent = id(2).untyped();
+        let request = CascadeRequest {
+            parent_id: parent,
+            parent_type: TypeId::of::<ConfigAsset<QueueConfig>>(),
+            triggered_by: child,
+        };
+        queue.enqueue(request);
+        queue.enqueue(request);
+        assert_eq!(queue.pending.len(), 1);
+        assert!(queue.seen.contains(&(child, child)));
+        assert!(queue.seen.contains(&(parent, child)));
+    }
+
+    #[test]
+    fn multi_level_cycle_stops_at_the_original_asset() {
+        let asset_type = TypeId::of::<ConfigAsset<QueueConfig>>();
+        let child = id(10);
+        let parent = id(11);
+        let grandparent = id(12);
+        let mut app = App::new();
+        app.add_plugins((bevy::app::TaskPoolPlugin::default(), AssetPlugin::default()));
+        app.init_asset::<ConfigAsset<QueueConfig>>()
+            .init_resource::<HandleEntityCache<ConfigAsset<QueueConfig>>>()
+            .init_resource::<AssetRevision<ConfigAsset<QueueConfig>>>()
+            .init_resource::<DependencyGraph>()
+            .init_resource::<CascadeQueue>()
+            .add_message::<ConfigRefresh<QueueConfig>>()
+            .insert_resource(Captured::default())
+            .add_systems(
+                Update,
+                (cascade_dispatch_system::<ConfigAsset<QueueConfig>>, capture).chain(),
+            );
+
+        {
+            let mut assets = app
+                .world_mut()
+                .resource_mut::<Assets<ConfigAsset<QueueConfig>>>();
+            for (asset_id, value) in [(child, 1), (parent, 2), (grandparent, 3)] {
+                let _ = assets.insert(
+                    asset_id,
+                    ConfigAsset {
+                        raw: QueueConfig { value },
+                        source_path: format!("data/{value}.ron"),
+                    },
+                );
+            }
+        }
+        {
+            let mut graph = app.world_mut().resource_mut::<DependencyGraph>();
+            graph
+                .parents_of
+                .insert(child.untyped(), vec![(parent.untyped(), asset_type)]);
+            graph
+                .parents_of
+                .insert(parent.untyped(), vec![(grandparent.untyped(), asset_type)]);
+            graph
+                .parents_of
+                .insert(grandparent.untyped(), vec![(child.untyped(), asset_type)]);
+        }
+        app.world_mut()
+            .resource_mut::<CascadeQueue>()
+            .enqueue(CascadeRequest {
+                parent_id: parent.untyped(),
+                parent_type: asset_type,
+                triggered_by: child.untyped(),
+            });
+
+        app.update();
+        app.update();
+        app.update();
+
+        let captured = &app.world().resource::<Captured>().0;
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].asset_id, parent.untyped());
+        assert_eq!(captured[1].asset_id, grandparent.untyped());
+        assert!(app.world().resource::<CascadeQueue>().pending.is_empty());
     }
 }
