@@ -1,9 +1,11 @@
-//! Generic HMR (Hot Module Replacement) framework for Bevy 0.19.
+//! Semantic config change and asset-impact propagation for Bevy 0.19.
 //!
-//! Hot-reload ron/json config files with targeted, diff-based refresh.
-//! Designed to be project-agnostic: define your `XxxDatabase` Asset type,
-//! implement [`ConfigDiff`], then call [`App::register_config`](crate::ConfigHmrAppExt::register_config)
-//! to wire it up. Subscribers consume [`ConfigRefresh<T>`] messages.
+//! Bevy's `AssetServer` remains responsible for watching, loading, and replacing
+//! assets. This crate adds targeted, diff-based refresh semantics for RON/JSON
+//! configs and entity-impact routing for changed assets. Define an
+//! `XxxDatabase` Asset type, implement [`ConfigDiff`], then call
+//! [`App::register_config`](crate::ConfigHmrAppExt::register_config) to wire it
+//! up. Subscribers consume [`ConfigRefresh<T>`] messages.
 //!
 //! # Quick start
 //! ```no_run
@@ -34,6 +36,7 @@ mod diff;
 pub mod ext;
 mod loader;
 mod metrics;
+mod reflect_tracker;
 mod refresh;
 mod registry;
 mod view;
@@ -57,6 +60,10 @@ pub use ext::ConfigHmrAppExt;
 pub use ext::{HmrAutoWatch, HmrAutoWatchPlugin, adopt_handle, take_over_handle};
 pub use loader::{ConfigLoader, ConfigValidator};
 pub use metrics::HmrMetrics;
+pub use reflect_tracker::{
+    ReflectHandleCache, ReflectHandleExtraction, ReflectHandleTrackingMetrics,
+    ReflectHandleTrackingPlugin, ReflectHandleTrackingSet, extract_reflected_handles,
+};
 pub use refresh::{
     ConfigDelta, ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind, RefreshCause,
 };
@@ -97,7 +104,7 @@ use std::time::Duration;
 /// // app.register_config::<MyDb>("data/my.ron");
 /// ```
 pub struct ConfigHmrPlugin {
-    /// Debounce window for batching rapid file changes. Default 150ms.
+    /// Window for merging rapid business dispatches per asset. Default 150ms.
     pub debounce_window: Duration,
 }
 

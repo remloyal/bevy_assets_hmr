@@ -2,7 +2,7 @@
 name = "bevy_assets_hmr"
 version = "0.0.1"
 edition = "2024"
-description = "Generic HMR framework for Bevy 0.19 — hot-reload ron/json configs with targeted refresh"
+description = "Semantic config diffs and asset-impact hot reload for Bevy 0.19"
 license = "MIT"
 authors = ["remloyal <remloyal@163.com>"]
 readme = "README.md"
@@ -17,10 +17,14 @@ categories = ["game-development"]
 
 [features]
 default = ["dev"]
-# 开发模式：启用 HMR 运行时监听、diff、派发系统。
-# 发布时 `--no-default-features` 可编译期禁用，零运行时开销，
-# 资产正常加载但不再监听文件变更、不执行 diff、不派发事件。
-dev = []
+# 开发模式：启用本 crate 的事件扫描、diff 和业务派发系统。
+# 发布时 `--no-default-features` 可在编译期移除这些运行时系统；
+# Bevy 是否继续监听并重载资产由消费方的 feature 决定。
+dev = ["reflect_auto_tracking"]
+# 开发期反射扫描：通过 Bevy 内置反射 API 自动发现实体组件中的 Handle，
+# 无需直接依赖 bevy_reflect。
+# 模块仍需显式安装 ReflectHandleTrackingPlugin 才会运行。
+reflect_auto_tracking = []
 
 [dependencies]
 bevy = { version = "0.19.0", default-features = false, features = [
@@ -37,7 +41,7 @@ thiserror = "2.0"
 # Dev 示例含窗口 (basic_viewer) 使用 DefaultPlugins，需要 bevy 默认完整 feature 集
 # 同时显式启用 `bevy/file_watcher`：修改 assets/ 下文件后 AssetServer 才能触发 AssetEvent::Modified，
 # 进而驱动 HMR 框架的 diff + ConfigRefresh 派发。bevy 0.19 的 default features 不含 file_watcher。
-bevy = { version = "0.19.0", default-features = true, features = ["file_watcher"] }
+bevy = { version = "0.19.0", default-features = true, features = ["file_watcher", "jpeg"] }
 bevy_assets_hmr = { path = "." }
 bevy_asset_macros = "0.19.0"
 bevy_asset_loader = { version = "0.27", features = ["2d"] }
@@ -47,6 +51,15 @@ uuid = "1"
 [[example]]
 name = "bsn_asset_bind"
 path = "examples/bsn_asset_bind.rs"
+
+# BSN code-first 场景：组件内 Handle 由反射追踪，无需 AssetBind。
+[[example]]
+name = "bsn_reflect_auto"
+path = "examples/bsn_reflect_auto.rs"
+
+[[example]]
+name = "bsn_reflect_business"
+path = "examples/bsn_reflect_business.rs"
 
 # 依赖链级联示例：演示 ParentDb -> ChildDb 跨类型级联
 [[example]]

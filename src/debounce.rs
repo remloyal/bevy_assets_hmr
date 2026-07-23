@@ -94,6 +94,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
     mut debouncer: ResMut<RefreshDebouncer<A>>,
     assets: Res<Assets<A>>,
     cache: Res<HandleEntityCache<A>>,
+    reflect_cache: Option<Res<crate::ReflectHandleCache>>,
     mut snapshots: ResMut<LastSnapshot<A>>,
     mut refresh_evts: MessageWriter<ConfigRefresh<A::Config>>,
     mut removed_evts: MessageWriter<ConfigRemoved<A::Config>>,
@@ -139,10 +140,15 @@ pub fn flush_debounced_refresh<A: HmrSource>(
 
             revisions.record_removed(id);
 
-            let target_entities: Vec<_> = cache
+            let mut target_entities: Vec<_> = cache
                 .get_entities(&id)
                 .map(|s| s.iter().copied().collect())
                 .unwrap_or_default();
+            crate::reflect_tracker::merge_target_entities(
+                reflect_cache.as_deref(),
+                id.untyped(),
+                &mut target_entities,
+            );
 
             removed_evts.write(ConfigRemoved {
                 asset_id: id.untyped(),
@@ -246,10 +252,15 @@ pub fn flush_debounced_refresh<A: HmrSource>(
 
             // Collect target_entities from the cache (may be empty for the
             // data-table-via-Resource pattern).
-            let target_entities: Vec<_> = cache
+            let mut target_entities: Vec<_> = cache
                 .get_entities(&id)
                 .map(|s| s.iter().copied().collect())
                 .unwrap_or_default();
+            crate::reflect_tracker::merge_target_entities(
+                reflect_cache.as_deref(),
+                id.untyped(),
+                &mut target_entities,
+            );
 
             let changed_count = changed_ids.len();
             let entity_count = target_entities.len();

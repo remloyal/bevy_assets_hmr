@@ -1,5 +1,5 @@
-//! File-level hot-reload for **any** Bevy `Asset` type (images, 3D models,
-//! audio, scenes, fonts, …) — no `ConfigDiff` required.
+//! Business-impact notifications for **any** Bevy `Asset` type (images, 3D
+//! models, audio, fonts, and more) — no `ConfigDiff` required.
 //!
 //! Unlike [`crate::register_config`] / [`crate::register_asset`], which
 //! compute an id-level diff and dispatch [`crate::ConfigRefresh`],
@@ -7,8 +7,8 @@
 //!
 //! 1. **Entity binding** via [`AssetBind<A>`] — attach to entities so the
 //!    framework knows which entities depend on a given asset handle.
-//! 2. **Change notification** via [`AssetChanged<A>`] — fired whenever the
-//!    asset is modified (file edited on disk → `AssetEvent::Modified`).
+//! 2. **Change notification** via [`AssetChanged<A>`] — fired for
+//!    `AssetEvent::Added` and `AssetEvent::Modified`, including disk reloads.
 //!
 //! Bevy's `AssetServer` (with `bevy/file_watcher`) already handles the actual
 //! file reloading and GPU upload for built-in asset types. This module just
@@ -22,7 +22,7 @@
 //! app.add_plugins(DefaultPlugins) // 需在 Cargo.toml 显式启用 `bevy/file_watcher` feature
 //!     .add_plugins(ConfigHmrPlugin::default())
 //!     .watch_asset::<Image>()
-//!     .watch_asset::<Scene>();
+//!     .watch_asset::<Mesh>();
 //!
 //! // Subscribe:
 //! fn on_image_changed(mut reader: MessageReader<AssetChanged<Image>>) {
@@ -40,7 +40,7 @@ use bevy::ecs::{
     system::{Query, ResMut},
     template::{FromTemplate, SpecializeFromTemplate, Template, TemplateContext},
 };
-use bevy::prelude::{Changed, Handle, RemovedComponents, Resource};
+use bevy::prelude::{Changed, Handle, RemovedComponents, Res, Resource};
 use std::collections::{HashMap, HashSet};
 
 /// Marker component binding an entity to an `A` handle (where `A: Asset`).
@@ -372,6 +372,7 @@ pub fn asset_watcher_system<A: Asset>(
     mut asset_events: MessageReader<AssetEvent<A>>,
     bindings: Query<&AssetBind<A>>,
     mut cache: ResMut<AssetBindCache<A>>,
+    reflect_cache: Option<Res<crate::ReflectHandleCache>>,
     mut changed_evts: MessageWriter<AssetChanged<A>>,
     mut removed_evts: MessageWriter<AssetRemoved<A>>,
 ) {
@@ -392,10 +393,15 @@ pub fn asset_watcher_system<A: Asset>(
                         cache.record_path(id, path);
                     }
                 }
-                let target_entities: Vec<Entity> = cache
+                let mut target_entities: Vec<Entity> = cache
                     .get_entities(&id)
                     .map(|s| s.iter().copied().collect())
                     .unwrap_or_default();
+                crate::reflect_tracker::merge_target_entities(
+                    reflect_cache.as_deref(),
+                    id.untyped(),
+                    &mut target_entities,
+                );
                 let target_count = target_entities.len();
                 let source_path = cache.get_path(&id).unwrap_or_default().to_string();
                 changed_evts.write(AssetChanged {
@@ -412,10 +418,15 @@ pub fn asset_watcher_system<A: Asset>(
             }
             AssetEvent::Modified { id } => {
                 let id = *id;
-                let target_entities: Vec<Entity> = cache
+                let mut target_entities: Vec<Entity> = cache
                     .get_entities(&id)
                     .map(|s| s.iter().copied().collect())
                     .unwrap_or_default();
+                crate::reflect_tracker::merge_target_entities(
+                    reflect_cache.as_deref(),
+                    id.untyped(),
+                    &mut target_entities,
+                );
                 let target_count = target_entities.len();
                 let source_path = cache.get_path(&id).unwrap_or_default().to_string();
                 changed_evts.write(AssetChanged {
@@ -432,10 +443,15 @@ pub fn asset_watcher_system<A: Asset>(
             }
             AssetEvent::Removed { id } => {
                 let id = *id;
-                let target_entities: Vec<Entity> = cache
+                let mut target_entities: Vec<Entity> = cache
                     .get_entities(&id)
                     .map(|s| s.iter().copied().collect())
                     .unwrap_or_default();
+                crate::reflect_tracker::merge_target_entities(
+                    reflect_cache.as_deref(),
+                    id.untyped(),
+                    &mut target_entities,
+                );
                 let target_count = target_entities.len();
                 // Preserve the path in AssetRemoved, then release the cache
                 // entry. A later Added event can recover it from live binds.

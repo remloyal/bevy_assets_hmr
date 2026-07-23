@@ -102,8 +102,8 @@ pub trait ConfigHmrAppExt {
     /// 自定义 `AssetLoader` 加载的 Asset 类型，不经过 `ConfigAsset<T>` 包装。
     ///
     /// 与 `register_config` 的区别：
-    /// - **不注册 ConfigLoader**：用户用自己的 loader（如 bevy 内置的
-    ///   `ImageLoader`、`AudioLoader`，或自定义二进制 loader）
+    /// - **不注册 ConfigLoader**：用户使用自己的配置或二进制 loader。
+    ///   `Image`、`AudioSource` 等普通 Bevy Asset 通常应使用 `watch_asset`
     /// - **不调用 init_asset**：用户应自行 `app.init_asset::<A>()` 和
     ///   `app.init_asset_loader::<MyLoader>()`
     /// - **Asset 本身就是 Config**：`A: HmrSource<Config = A>`，用户需
@@ -218,13 +218,13 @@ pub trait ConfigHmrAppExt {
     /// In a real app with `DefaultPlugins`, this is a no-op equivalent.
     fn setup_hmr_headless(&mut self) -> &mut Self;
 
-    /// Watch an **arbitrary** `Asset` type for file-level hot-reload — no
-    /// `ConfigDiff` / `HmrSource` required.
+    /// Attach business-impact notification to an **arbitrary** `Asset` type —
+    /// no `ConfigDiff` / `HmrSource` required.
     ///
     /// This is the "lighter" alternative to [`register_asset`](Self::register_asset)
     /// for asset types where you only need change-notification + entity
     /// binding tracking, not id-level diffing. Typical use cases: `Image`,
-    /// `Scene` (gltf), `AudioSource`, `Mesh`, fonts.
+    /// `AudioSource`, `Mesh`, fonts, and model asset types.
     ///
     /// Bevy's `AssetServer` (with `bevy/file_watcher`) handles the actual
     /// file reloading and GPU upload for built-in types. This method adds:
@@ -391,7 +391,8 @@ impl ConfigHmrAppExt for App {
                     asset_bind_cleanup_system::<A>,
                     asset_watcher_system::<A>,
                 )
-                    .chain(),
+                    .chain()
+                    .after(crate::ReflectHandleTrackingSet),
             );
         }
 
@@ -494,7 +495,8 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
                 crate::view::route_active_config_views::<ConfigAsset<T>>,
                 crate::view::sync_activated_config_views::<ConfigAsset<T>>,
             )
-                .chain(),
+                .chain()
+                .after(crate::ReflectHandleTrackingSet),
         )
         .add_systems(
             Update,
@@ -567,7 +569,8 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
                 crate::view::route_active_config_views::<A>,
                 crate::view::sync_activated_config_views::<A>,
             )
-                .chain(),
+                .chain()
+                .after(crate::ReflectHandleTrackingSet),
         )
         .add_systems(
             Update,

@@ -129,6 +129,7 @@ pub fn asset_load_failed_system<A: HmrSource>(
     mut failures: MessageReader<AssetLoadFailedEvent<A>>,
     snapshots: Res<LastSnapshot<A>>,
     cache: Res<HandleEntityCache<A>>,
+    reflect_cache: Option<Res<crate::ReflectHandleCache>>,
     mut revisions: ResMut<crate::view::AssetRevision<A>>,
     mut metrics: ResMut<crate::metrics::HmrMetrics<A>>,
     mut failed_messages: MessageWriter<crate::refresh::ConfigReloadFailed<A::Config>>,
@@ -145,10 +146,15 @@ pub fn asset_load_failed_system<A: HmrSource>(
             .get(&failure.id)
             .cloned()
             .unwrap_or_else(|| failure.path.to_string());
-        let target_entities = cache
+        let mut target_entities = cache
             .get_entities(&failure.id)
             .map(|entities| entities.iter().copied().collect())
             .unwrap_or_default();
+        crate::reflect_tracker::merge_target_entities(
+            reflect_cache.as_deref(),
+            failure.id.untyped(),
+            &mut target_entities,
+        );
         let error = failure.error.to_string();
 
         revisions.record_failed(failure.id, source_path.clone(), error.clone());

@@ -233,10 +233,12 @@ pub fn dependency_cleanup_system<A: HmrSource>(
 /// We batch-process all entries for type `A` per frame, then clear them
 /// from the queue. Entries for other types remain for their own dispatch
 /// system.
+#[allow(clippy::too_many_arguments)]
 pub fn cascade_dispatch_system<A: HmrSource>(
     mut queue: ResMut<CascadeQueue>,
     assets: Res<Assets<A>>,
     cache: Res<crate::binding::HandleEntityCache<A>>,
+    reflect_cache: Option<Res<crate::ReflectHandleCache>>,
     mut revisions: ResMut<crate::view::AssetRevision<A>>,
     mut metrics: ResMut<crate::metrics::HmrMetrics<A>>,
     mut refresh_evts: MessageWriter<crate::refresh::ConfigRefresh<A::Config>>,
@@ -277,10 +279,15 @@ pub fn cascade_dispatch_system<A: HmrSource>(
         metrics.record_config_clone(asset.config());
         let new_config = asset.config().clone();
         let source_path = asset.source_path().to_string();
-        let target_entities: Vec<bevy::ecs::entity::Entity> = cache
+        let mut target_entities: Vec<bevy::ecs::entity::Entity> = cache
             .get_entities(&parent_id)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
+        crate::reflect_tracker::merge_target_entities(
+            reflect_cache.as_deref(),
+            parent_untyped,
+            &mut target_entities,
+        );
         revisions.record_available(parent_id);
 
         refresh_evts.write(crate::refresh::ConfigRefresh {
