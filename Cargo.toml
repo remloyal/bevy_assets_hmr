@@ -8,6 +8,10 @@ authors = ["remloyal <remloyal@163.com>"]
 readme = "README.md"
 homepage = "https://github.com/remloyal/bevy_assets_hmr"
 repository = "https://github.com/remloyal/bevy_assets_hmr"
+exclude = [
+    "bevy_assets_hmr 改进计划检查清单.md",
+    "bevy_assets_hmr 插件存在必要性、独有价值与现存短板总结.md",
+]
 keywords = ["bevy", "hmr", "hot-reload", "config", "assets"]
 categories = ["game-development"]
 
