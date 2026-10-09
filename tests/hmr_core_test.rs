@@ -18,8 +18,8 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy_assets_hmr::{
     ConfigAsset, ConfigBind, ConfigDiff, ConfigHandle, ConfigHmrAppExt, ConfigHmrPlugin,
-    ConfigRefresh, ConfigReloadFailed, ConfigRemoved, HandleEntityCache, HmrMetrics, HmrSource,
-    LastSnapshot, RefreshCause, RefreshDebouncer,
+    ConfigPathRegistry, ConfigRefresh, ConfigReloadFailed, ConfigRemoved, HandleEntityCache,
+    HmrMetrics, HmrSource, LastSnapshot, RefreshCause, RefreshDebouncer,
 };
 // 注：`ConfigRefresh<TestDb>` 的泛型是 Config 类型（`ConfigAsset<TestDb>::Config = TestDb`），
 // 所以仍是 `ConfigRefresh<TestDb>`。`RefreshDebouncer` / `LastSnapshot` 的泛型是
@@ -116,6 +116,41 @@ fn register_config_initializes_all_resources() {
         world
             .get_resource::<LastSnapshot<ConfigAsset<TestDb>>>()
             .is_some()
+    );
+}
+
+/// Registration must not panic when `ConfigHmrPlugin` was never added: the path
+/// registry is created on demand and the debounce window falls back to the
+/// default, instead of failing with a bare "resource does not exist" panic.
+#[test]
+fn register_config_without_plugin_creates_path_registry() {
+    use bevy::tasks::{IoTaskPool, TaskPoolBuilder};
+    IoTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(1).build());
+
+    let mut app = App::new();
+    app.add_plugins((
+        bevy::app::TaskPoolPlugin::default(),
+        bevy::asset::AssetPlugin::default(),
+        bevy::time::TimePlugin,
+    ));
+    app.setup_hmr_headless();
+    // Deliberately no ConfigHmrPlugin.
+    app.register_config::<TestDb>("data/no_plugin.ron");
+
+    let registry = app.world().resource::<ConfigPathRegistry>();
+    let paths = registry
+        .paths
+        .get(ConfigAsset::<TestDb>::type_path())
+        .expect("path should still be registered without the plugin");
+    assert!(paths.iter().any(|path| path == "data/no_plugin.ron"));
+
+    let debouncer = app
+        .world()
+        .resource::<RefreshDebouncer<ConfigAsset<TestDb>>>();
+    assert_eq!(
+        debouncer.window,
+        Duration::from_millis(150),
+        "debounce window should fall back to the 150ms default"
     );
 }
 
@@ -2001,5 +2036,81 @@ fn cascade_triggers_on_child_load_failure() {
     assert!(
         app.world().resource::<CapturedParentRefresh>().0.is_some(),
         "child recovery should also cascade to the parent"
+    );
+}
+
+/// Removing an asset drops its snapshot, so a later reappearance of the same
+/// asset id looks like a "first load" again. Subscribers that cleaned up on
+/// `ConfigRemoved` must still be told the config is back — otherwise the
+/// removed state is permanent for them.
+#[test]
+fn reinserted_asset_after_removal_dispatches_refresh_again() {
+    let mut app = make_app(Duration::from_millis(0));
+    let asset_id = make_id(501);
+
+    // Seed through `Assets` only, bypassing `insert_config` (which pre-seeds the
+    // snapshot), so this matches what `AssetServer` does on a load.
+    let seed = TestDb {
+        items: vec![Item {
+            id: "a".into(),
+            n: 1,
+        }],
+    };
+    let _ = app
+        .world_mut()
+        .resource_mut::<Assets<ConfigAsset<TestDb>>>()
+        .insert(
+            asset_id,
+            ConfigAsset {
+                raw: seed,
+                source_path: "data/back.ron".into(),
+            },
+        );
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<CapturedRefresh>().0.is_none(),
+        "the first load must not dispatch a refresh"
+    );
+
+    // Remove it: `ConfigRemoved` fires and the snapshot is dropped.
+    let _ = app
+        .world_mut()
+        .resource_mut::<Assets<ConfigAsset<TestDb>>>()
+        .remove(asset_id);
+    for _ in 0..3 {
+        app.update();
+    }
+
+    // It comes back with different content.
+    let changed = TestDb {
+        items: vec![Item {
+            id: "a".into(),
+            n: 2,
+        }],
+    };
+    let _ = app
+        .world_mut()
+        .resource_mut::<Assets<ConfigAsset<TestDb>>>()
+        .insert(
+            asset_id,
+            ConfigAsset {
+                raw: changed,
+                source_path: "data/back.ron".into(),
+            },
+        );
+
+    let mut dispatched = false;
+    for _ in 0..5 {
+        app.update();
+        if app.world().resource::<CapturedRefresh>().0.is_some() {
+            dispatched = true;
+            break;
+        }
+    }
+    assert!(
+        dispatched,
+        "re-adding an asset after ConfigRemoved must dispatch a refresh"
     );
 }

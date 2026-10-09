@@ -268,3 +268,74 @@ fn semantic_validator_uses_loader_failure_path_and_retains_last_valid_asset() {
         1
     );
 }
+
+/// An asset whose **first** load fails never gets a snapshot, so the `None`
+/// branch of `flush_debounced_refresh` runs when the file is later repaired.
+/// That branch must still notify subscribers: otherwise a consumer that showed
+/// a "missing data" placeholder after `ConfigReloadFailed { current_config: None }`
+/// is never told the config arrived.
+#[test]
+fn initial_load_failure_then_repair_dispatches_recovery_refresh() {
+    bevy::tasks::IoTaskPool::get_or_init(|| {
+        bevy::tasks::TaskPoolBuilder::new().num_threads(1).build()
+    });
+
+    let root = std::env::temp_dir().join(format!("bevy_assets_hmr_{}", Uuid::new_v4()));
+    fs::create_dir_all(root.join("data")).expect("create temporary asset directory");
+    let asset_path = root.join("data/recovery.ron");
+    // Start from an unparseable file so the very first load fails and no
+    // snapshot is ever created for this asset id.
+    fs::write(&asset_path, "(items: [(id: \"same\", n: not_a_number)])\n")
+        .expect("write invalid asset");
+    let _temp_dir = TempAssetDir(root.clone());
+
+    let mut app = App::new();
+    app.add_plugins((
+        bevy::app::TaskPoolPlugin::default(),
+        AssetPlugin {
+            file_path: root.to_string_lossy().into_owned(),
+            watch_for_changes_override: Some(true),
+            use_asset_processor_override: Some(false),
+            ..Default::default()
+        },
+        bevy::time::TimePlugin,
+    ));
+    app.add_plugins(ConfigHmrPlugin {
+        debounce_window: Duration::from_millis(0),
+    });
+    app.setup_hmr_headless();
+    app.register_config::<RecoveryDb>("data/recovery.ron");
+    app.insert_resource(Captured::default());
+    app.add_systems(Update, capture);
+
+    assert!(
+        update_until(&mut app, Duration::from_secs(5), |world| {
+            world
+                .resource::<Captured>()
+                .failures
+                .iter()
+                .any(|event| event.current_config.is_none())
+        }),
+        "the initial load failure should be reported without a previous config"
+    );
+    assert!(
+        app.world()
+            .resource::<bevy_assets_hmr::LastSnapshot<ConfigAsset<RecoveryDb>>>()
+            .map
+            .is_empty(),
+        "a failed first load must not create a snapshot"
+    );
+
+    fs::write(&asset_path, "(items: [(id: \"same\", n: 5)])\n").expect("repair asset");
+
+    assert!(
+        update_until(&mut app, Duration::from_secs(5), |world| {
+            world
+                .resource::<Captured>()
+                .refreshes
+                .iter()
+                .any(|event| event.cause == RefreshCause::Recovery)
+        }),
+        "repairing a file whose first load failed must dispatch a Recovery refresh"
+    );
+}

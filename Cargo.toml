@@ -2,7 +2,7 @@
 name = "bevy_assets_hmr"
 version = "0.0.1"
 edition = "2024"
-description = "Semantic config diffs and asset-impact hot reload for Bevy 0.19"
+description = "Semantic config diffs and asset-impact hot reload for Bevy 0.20"
 license = "MIT"
 authors = ["remloyal <remloyal@163.com>"]
 readme = "README.md"
@@ -27,7 +27,7 @@ dev = ["reflect_auto_tracking"]
 reflect_auto_tracking = []
 
 [dependencies]
-bevy = { version = "0.19.0", default-features = false, features = [
+bevy = { version = "0.20.0", default-features = false, features = [
     "bevy_asset",
     "bevy_log",
 ] }
@@ -40,11 +40,11 @@ thiserror = "2.0"
 [dev-dependencies]
 # Dev 示例含窗口 (basic_viewer) 使用 DefaultPlugins，需要 bevy 默认完整 feature 集
 # 同时显式启用 `bevy/file_watcher`：修改 assets/ 下文件后 AssetServer 才能触发 AssetEvent::Modified，
-# 进而驱动 HMR 框架的 diff + ConfigRefresh 派发。bevy 0.19 的 default features 不含 file_watcher。
-bevy = { version = "0.19.0", default-features = true, features = ["file_watcher", "jpeg"] }
+# 进而驱动 HMR 框架的 diff + ConfigRefresh 派发。bevy 0.20 的 default features 不含 file_watcher。
+bevy = { version = "0.20.0", default-features = true, features = ["file_watcher", "jpeg"] }
 bevy_assets_hmr = { path = "." }
-bevy_asset_macros = "0.19.0"
-bevy_asset_loader = { version = "0.27", features = ["2d"] }
+bevy_asset_macros = "0.20.0"
+bevy_asset_loader = { version = "0.28.0-rc.1", features = ["2d"] }
 uuid = "1"
 
 # 临时验证 example：bsn! + AssetBind<Image> 是否可编译
@@ -94,6 +94,6 @@ harness = false
 name = "diff_baseline"
 path = "examples/diff_baseline.rs"
 
-# HMR 文件监听由消费方启用 `bevy/file_watcher` feature 实现（bevy 0.19
+# HMR 文件监听由消费方启用 `bevy/file_watcher` feature 实现（bevy 0.20
 # 依赖 notify-debouncer-full ^0.7.0，现已可用）。本 crate 只负责
 # diff + 派发 ConfigRefresh，不直接监听文件。

@@ -202,7 +202,12 @@ pub fn cache_validation_system<A: HmrSource>(
     for (entity, bind) in bindings.iter() {
         new_cache.insert(entity, bind.handle.id());
     }
-    if cache.entity_to_handle != new_cache.entity_to_handle {
+    // Both directions are compared: `handle_to_entities` is derivable from
+    // `entity_to_handle`, but the two fields are `pub`, so an external mutation
+    // could leave only one of them drifted.
+    if cache.entity_to_handle != new_cache.entity_to_handle
+        || cache.handle_to_entities != new_cache.handle_to_entities
+    {
         *cache = new_cache;
     }
 }

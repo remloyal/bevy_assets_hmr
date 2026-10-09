@@ -229,3 +229,52 @@ fn with_id_index_falls_back_without_panicking() {
     let bind = ConfigBind::<ConfigAsset<DummyDb>>::with_id(default_handle.id());
     assert_eq!(bind.handle.id(), default_handle.id());
 }
+
+/// `cache_validation_system` is the drift safety net that rebuilds the cache
+/// from the live components. It must repair *either* direction: both fields are
+/// `pub`, so a mutation that leaves only `handle_to_entities` drifted has to be
+/// corrected too. Comparing just `entity_to_handle` silently accepted that
+/// corruption.
+#[test]
+fn cache_validation_repairs_drifted_handle_to_entities() {
+    use bevy::prelude::{App, Update};
+    use bevy_assets_hmr::cache_validation_system;
+
+    let id = make_id(99);
+    let mut app = App::new();
+    app.init_resource::<HandleEntityCache<ConfigAsset<DummyDb>>>()
+        .add_systems(Update, cache_validation_system::<ConfigAsset<DummyDb>>);
+
+    let entity = app
+        .world_mut()
+        .spawn(ConfigBind::<ConfigAsset<DummyDb>>::with_id(id))
+        .id();
+
+    // The first run populates the cache from the live `ConfigBind` component.
+    app.update();
+    {
+        let cache = app
+            .world()
+            .resource::<HandleEntityCache<ConfigAsset<DummyDb>>>();
+        assert_eq!(cache.entity_to_handle.len(), 1);
+        assert!(cache.get_entities(&id).is_some_and(|set| set.contains(&entity)));
+    }
+
+    // Corrupt only `handle_to_entities`, leaving `entity_to_handle` intact.
+    {
+        let mut cache = app
+            .world_mut()
+            .resource_mut::<HandleEntityCache<ConfigAsset<DummyDb>>>();
+        cache.handle_to_entities.clear();
+    }
+
+    app.update();
+
+    let cache = app
+        .world()
+        .resource::<HandleEntityCache<ConfigAsset<DummyDb>>>();
+    assert!(
+        cache.get_entities(&id).is_some_and(|set| set.contains(&entity)),
+        "drift in handle_to_entities alone must still be repaired"
+    );
+}

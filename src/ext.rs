@@ -324,10 +324,17 @@ impl ConfigHmrAppExt for App {
         // fire and eventually reach `flush_debounced_refresh`, but since the
         // snapshot already exists and matches the new asset, the diff will
         // be empty and no refresh will be dispatched.
-        self.world_mut()
-            .resource_mut::<LastSnapshot<ConfigAsset<T>>>()
-            .map
-            .insert(id, raw);
+        {
+            let mut snapshots = self.world_mut().resource_mut::<LastSnapshot<ConfigAsset<T>>>();
+            snapshots.map.insert(id, raw);
+            // Record the path eagerly too, so a `ConfigRemoved` dispatched
+            // before the first flush can still report it (mirrors `insert_asset`).
+            if !source_path.is_empty() {
+                snapshots
+                    .source_paths
+                    .insert(id, source_path.to_string());
+            }
+        }
         self
     }
 
@@ -438,7 +445,7 @@ pub fn load_config_at_startup<A: HmrSource>(
     }
     commands.insert_resource(holder);
     // tracing 宏在无 subscriber 时为空操作，不会 panic；无 LogPlugin
-    // 的测试环境也不会触发 IoTaskPool 依赖（bevy 0.19 已解耦）。
+    // 的测试环境也不会触发 IoTaskPool 依赖（bevy 0.20 已解耦）。
 }
 
 // ===========================================================================
@@ -458,7 +465,7 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
         .world()
         .get_resource::<HmrSettings>()
         .map(|s| s.debounce_window)
-        .unwrap_or_else(|| Duration::from_millis(150));
+        .unwrap_or_else(|| Duration::from_millis(crate::DEFAULT_DEBOUNCE_MILLIS));
 
     if !asset_type_installed {
         let (loader, validator) = ConfigLoader::<T>::with_validator();
@@ -510,6 +517,7 @@ pub fn register_config_impl<T: HmrAsset>(app: &mut App, path: &str, autoload: bo
         .resource_mut::<RefreshDebouncer<ConfigAsset<T>>>()
         .window = debounce_window;
 
+    ensure_path_registry(app);
     app.world_mut()
         .resource_mut::<ConfigPathRegistry>()
         .register(ConfigAsset::<T>::type_path().to_string(), path);
@@ -537,7 +545,7 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
         .world()
         .get_resource::<HmrSettings>()
         .map(|s| s.debounce_window)
-        .unwrap_or_else(|| Duration::from_millis(150));
+        .unwrap_or_else(|| Duration::from_millis(crate::DEFAULT_DEBOUNCE_MILLIS));
 
     if !asset_type_installed {
         app.init_resource::<HandleEntityCache<A>>()
@@ -582,6 +590,7 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
 
     app.world_mut().resource_mut::<RefreshDebouncer<A>>().window = debounce_window;
 
+    ensure_path_registry(app);
     app.world_mut()
         .resource_mut::<ConfigPathRegistry>()
         .register(A::type_path().to_string(), path);
@@ -598,6 +607,22 @@ pub fn register_asset_impl<A: HmrSource>(app: &mut App, path: &str, autoload: bo
         app.add_systems(Startup, load_config_at_startup::<A>);
         app.insert_resource(HmrStartupRegistered::<A>(PhantomData));
     }
+}
+
+/// 确保 [`ConfigPathRegistry`] 存在，并在 `ConfigHmrPlugin` 从未安装时给出
+/// 明确的警告而不是让后续 `resource_mut` 以 "resource does not exist" panic。
+///
+/// 注册仍然可用：debounce 窗口回退到 [`crate::DEFAULT_DEBOUNCE_MILLIS`]。
+fn ensure_path_registry(app: &mut App) {
+    if app.world().get_resource::<HmrSettings>().is_none() {
+        bevy::log::warn!(
+            "[HMR] register_config/register_asset was called before ConfigHmrPlugin; \
+             falling back to the default {}ms debounce window. \
+             Add `app.add_plugins(ConfigHmrPlugin::default())` to silence this.",
+            crate::DEFAULT_DEBOUNCE_MILLIS
+        );
+    }
+    app.init_resource::<ConfigPathRegistry>();
 }
 
 /// 初始化共享依赖资源（幂等：已存在则跳过）。

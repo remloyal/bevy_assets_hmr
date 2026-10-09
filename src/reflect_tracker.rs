@@ -8,7 +8,7 @@
 use bevy::asset::{ReflectHandle, UntypedAssetId};
 use bevy::ecs::{component::ComponentId, reflect::AppTypeRegistry};
 use bevy::prelude::{App, Entity, Plugin, Resource, SystemSet};
-use bevy::reflect::{PartialReflect, ReflectRef, TypeRegistry};
+use bevy::reflect::{PartialReflect, ReflectRef, TypeInfo, TypeRegistry};
 #[cfg(feature = "reflect_auto_tracking")]
 use bevy::{
     ecs::{
@@ -57,6 +57,20 @@ pub fn extract_reflected_handles(
     extraction
 }
 
+/// Whether a represented type is a `Handle<A>` that carries no `ReflectHandle`
+/// type data, i.e. its asset type was never passed to
+/// `register_asset_reflect`.
+///
+/// Detection keys off the crate name and type ident rather than the full
+/// `type_path` string. The module path of `Handle` is an internal layout detail
+/// that moves between Bevy releases (in 0.20 it became
+/// `bevy_asset::handle::Handle<A>`, so matching `"bevy_asset::Handle<"` silently
+/// stopped working), while the crate name and ident stay stable.
+fn is_unregistered_handle_type(info: &TypeInfo) -> bool {
+    let table = info.type_path_table();
+    table.crate_name() == Some("bevy_asset") && table.ident() == Some("Handle")
+}
+
 fn visit_reflected_value(
     value: &dyn PartialReflect,
     registry: &TypeRegistry,
@@ -82,7 +96,7 @@ fn visit_reflected_value(
             }
         } else if value
             .get_represented_type_info()
-            .is_some_and(|info| info.type_path().starts_with("bevy_asset::Handle<"))
+            .is_some_and(is_unregistered_handle_type)
         {
             extraction.missing_handle_type_data.insert(type_id);
             return;
@@ -365,8 +379,17 @@ fn reflect_handle_tracking_system(
             .is_none_or(|last| now.duration_since(last) >= settings.validation_interval);
     if full_validation {
         cache.last_validation = Some(now);
-        cache.archetype_candidates.clear();
         metrics.full_validations += 1;
+    }
+
+    // Take the per-archetype candidate cache out of the resource for the
+    // duration of the scan. Candidates are then borrowed per archetype instead
+    // of cloned once per entity: with N entities in the world the previous
+    // `candidates.clone()` allocated N `Vec<ComponentId>` every frame just to
+    // read the same short per-archetype list.
+    let mut candidates_by_archetype = std::mem::take(&mut cache.archetype_candidates);
+    if full_validation {
+        candidates_by_archetype.clear();
     }
 
     let mut live_entities = HashSet::new();
@@ -377,34 +400,31 @@ fn reflect_handle_tracking_system(
         live_entities.insert(entity);
         metrics.entities_scanned += 1;
 
-        let candidates = if let Some(candidates) = cache.archetype_candidates.get(&archetype_id) {
-            candidates.clone()
-        } else {
-            let mut candidates = Vec::new();
-            for component_id in archetype.iter_components() {
-                let Some(info) = components.get_info(component_id) else {
-                    continue;
-                };
-                let Some(type_id) = info.type_id() else {
-                    continue;
-                };
-                let Some(registration) = registry.get(type_id) else {
-                    if cache.missing_component_reflection.insert(type_id) {
+        let candidates = candidates_by_archetype
+            .entry(archetype_id)
+            .or_insert_with(|| {
+                let mut candidates = Vec::new();
+                for component_id in archetype.iter_components() {
+                    let Some(info) = components.get_info(component_id) else {
+                        continue;
+                    };
+                    let Some(type_id) = info.type_id() else {
+                        continue;
+                    };
+                    let Some(registration) = registry.get(type_id) else {
+                        if cache.missing_component_reflection.insert(type_id) {
+                            metrics.missing_component_types += 1;
+                        }
+                        continue;
+                    };
+                    if registration.data::<ReflectComponent>().is_some() {
+                        candidates.push(component_id);
+                    } else if cache.missing_component_reflection.insert(type_id) {
                         metrics.missing_component_types += 1;
                     }
-                    continue;
-                };
-                if registration.data::<ReflectComponent>().is_some() {
-                    candidates.push(component_id);
-                } else if cache.missing_component_reflection.insert(type_id) {
-                    metrics.missing_component_types += 1;
                 }
-            }
-            cache
-                .archetype_candidates
-                .insert(archetype_id, candidates.clone());
-            candidates
-        };
+                candidates
+            });
 
         let archetype_changed =
             cache.entity_archetypes.insert(entity, archetype_id) != Some(archetype_id);
@@ -415,7 +435,7 @@ fn reflect_handle_tracking_system(
             false
         };
 
-        for component_id in candidates {
+        for &component_id in candidates.iter() {
             metrics.component_ticks_checked += 1;
             let changed = full_validation
                 || archetype_changed
@@ -481,6 +501,9 @@ fn reflect_handle_tracking_system(
         cache.remove_entity(entity);
         metrics.entities_removed += 1;
     }
+
+    // Put the (possibly extended) archetype candidate lists back.
+    cache.archetype_candidates = candidates_by_archetype;
 
     metrics.scan_time += started.elapsed();
 }

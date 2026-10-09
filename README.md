@@ -1,6 +1,6 @@
 # bevy_assets_hmr
 
-建立在 Bevy 0.19 原生 Asset 热重载之上的**配置语义变更与资产影响传播层**。
+建立在 Bevy 0.20 原生 Asset 热重载之上的**配置语义变更与资产影响传播层**。
 
 Bevy 负责监听文件、重新加载 Asset、保持 Handle 稳定并更新渲染资源；`bevy_assets_hmr`
 负责解释“资产变化后业务上发生了什么”：配置表中哪些条目变化、哪些实体受影响，以及
@@ -62,7 +62,7 @@ app.register_config::<NpcDatabase>("data/npc.ron");
 - **自动快照**：首次加载自动初始化快照，不派发"首次加载"事件
 - **自动 diff + 派发**：文件变更后自动 diff + debounce + 派发 `ConfigRefresh<T>`
 - **多类型并存**：一个 App 可注册多种类型，各自独立 diff、独立订阅
-- **Bevy 0.19 适配**：`Message` / `MessageReader` / `MessageWriter`，`Asset` + `TypePath`
+- **Bevy 0.20 适配**：`Message` / `MessageReader` / `MessageWriter`，`Asset` + `TypePath`
 
 ## 快速开始
 
@@ -696,7 +696,9 @@ fn on_image_changed(
 
 ### 在 `bsn!` 宏中使用 `AssetBind`
 
-Bevy 0.19 的 `bsn!` 宏支持把 `AssetBind<A>` 当作组件写在场景条目里。`AssetBind<A>` 内含 `Handle<A>`,而 Bevy 用 `SpecializeFromTemplate` auto-trait 把 `Handle<A>` 刻意排除在 `Unpin` 之外,导致它无法走 `FromTemplate` 的 blanket impl。为此本 crate 提供了手写的 `AssetBindTemplate<A>` 作为 `<AssetBind<A> as FromTemplate>::Template`,你无需关心其存在,直接写 `AssetBind<A>` 即可。
+Bevy 0.20 的 `bsn!` 宏支持把 `AssetBind<A>` 当作组件写在场景条目里。`AssetBind<A>` 内含 `Handle<A>`，而 Bevy 用 `SpecializeFromTemplate` auto-trait 把 `Handle<A>` 刻意排除在 `Unpin` 之外，导致它无法走 `FromTemplate` 的 blanket impl。为此本 crate 提供了手写的 `AssetBindTemplate<A>` 作为 `<AssetBind<A> as FromTemplate>::Template`，你无需关心其存在，直接写 `AssetBind<A>` 即可。
+
+> Bevy 0.20 起 BSN 用 `--` 分隔同层条目，且不再需要把条目包在括号里；逗号与括号写法已废弃。
 
 ```rust
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -704,10 +706,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn_scene(bsn! {
         Node { width: percent(100), height: percent(100) }
         Children [
-            (
-                ImageNode { image: {asset_server.load("textures/bg.jpg")} }
-                AssetBind<Image> { handle: {asset_server.load("textures/bg.jpg")} }
-            ),
+            ImageNode { image: {asset_server.load("textures/bg.jpg")} }
+            AssetBind<Image> { handle: {asset_server.load("textures/bg.jpg")} }
         ]
     });
 
@@ -716,10 +716,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn_scene(bsn! {
         Node { width: percent(100), height: percent(100) }
         Children [
-            (
-                ImageNode { image: {handle.clone()} }
-                AssetBind<Image> { handle: {handle.clone()} }
-            ),
+            ImageNode { image: {handle.clone()} }
+            AssetBind<Image> { handle: {handle.clone()} }
         ]
     });
 }
@@ -885,7 +883,7 @@ app.init_state::<GameState>()
 
 > **前提**：需要 `bevy/file_watcher` feature（dev-deps 已启用）。
 
-## Bevy 0.19 兼容性
+## Bevy 0.20 兼容性
 
 ### `bevy/file_watcher` 文件监听
 

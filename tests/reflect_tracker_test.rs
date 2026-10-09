@@ -180,6 +180,44 @@ fn extractor_obeys_depth_limit() {
     assert!(extraction.handles.is_empty());
 }
 
+/// A `Handle<A>` whose asset type was never passed to `register_asset_reflect`
+/// is not present in the `TypeRegistry` at all, so the scanner cannot extract an
+/// asset id from it. That case must be *reported* rather than silently skipped,
+/// because it is the diagnostic users need when their handles stop being tracked.
+///
+/// This guards a real regression: detection used to match the literal
+/// `"bevy_asset::Handle<"` type-path prefix, which stopped matching in Bevy 0.20
+/// when `Handle`'s module path became `bevy_asset::handle::Handle<A>`.
+#[test]
+fn handle_without_reflect_handle_data_is_reported_as_missing() {
+    // An empty registry models "`register_asset_reflect::<A>()` was never
+    // called": `Handle<A>` has no registration and therefore no `ReflectHandle`
+    // type data.
+    let registry = TypeRegistry::default();
+
+    let value = HandleComponent {
+        direct: handle(7),
+        optional: None,
+        list: Vec::new(),
+    };
+    let extraction = extract_reflected_handles(&value, &registry, 32);
+
+    assert!(
+        extraction.handles.is_empty(),
+        "an unregistered handle must not yield an asset id"
+    );
+    assert_eq!(
+        extraction.missing_handle_type_data.len(),
+        1,
+        "the unregistered Handle type must be reported once"
+    );
+    assert!(
+        extraction
+            .missing_handle_type_data
+            .contains(&std::any::TypeId::of::<Handle<TrackedAsset>>())
+    );
+}
+
 #[test]
 fn reflected_component_index_updates_and_cleans_up() {
     let first = handle(10);
@@ -439,9 +477,7 @@ fn bsn_spawn_scene_tracks_root_and_nested_entities_without_asset_bind() {
         .spawn_scene(bsn! {
             BsnHandleComponent { handle: {handle.clone()} }
             Children [
-                (
-                    BsnHandleComponent { handle: {handle.clone()} }
-                ),
+                BsnHandleComponent { handle: {handle.clone()} }
             ]
         })
         .expect("BSN scene should resolve immediately")
@@ -494,9 +530,7 @@ fn bsn_queue_spawn_scene_is_tracked_after_deferred_spawn() {
     app.world_mut().queue_spawn_scene(bsn! {
         BsnHandleComponent { handle: {handle.clone()} }
         Children [
-            (
-                BsnHandleComponent { handle: {handle.clone()} }
-            ),
+            BsnHandleComponent { handle: {handle.clone()} }
         ]
     });
 

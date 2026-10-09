@@ -71,7 +71,9 @@ pub enum RefreshCause {
     },
     /// A subscriber explicitly requested a refresh.
     Manual,
-    /// A previously failed source became valid again.
+    /// A source that was previously reported as failed or removed is available
+    /// again. The `delta` is empty: subscribers should re-derive from the
+    /// current value rather than patch by id.
     Recovery,
 }
 
@@ -118,14 +120,21 @@ pub struct ConfigRefresh<T: ConfigDiff + Clone + Send + Sync + 'static> {
     pub source_path: String,
 }
 
-/// Event dispatched when a config asset of type `T` has been **removed**
-/// (e.g. the backing file was deleted, or `Assets::remove` / asset unload
-/// dropped it).
+/// Event dispatched when a config asset of type `T` has been **removed** from
+/// the `Assets` store (via `Assets::remove`, or an asset unload that dropped
+/// the last strong handle).
+///
+/// Note: deleting the backing file on disk does **not** produce this event.
+/// Bevy 0.20's file watcher reports the deletion, but `AssetServer` never acts
+/// on it, so no `AssetEvent::Removed` is emitted. A subscriber that must react
+/// to a vanished file has to detect that itself.
 ///
 /// `T` 是 Config 数据类型（与 [`ConfigRefresh<T>`] 相同）。
 ///
 /// Subscribers can use this to do cleanup work (despawn dependent entities,
-/// free resources, show a "missing data" placeholder, etc.).
+/// free resources, show a "missing data" placeholder, etc.). If the same asset
+/// id becomes available again later, a [`ConfigRefresh`] with
+/// [`RefreshCause::Recovery`] is dispatched so the cleanup can be undone.
 ///
 /// 与 `ConfigRefresh` 的区别：
 /// - 资产已被卸载，无法提供 `new_config` 或 `changed_ids`；

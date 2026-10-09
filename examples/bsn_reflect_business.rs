@@ -58,10 +58,8 @@ fn spawn_scene(mut commands: Commands) {
         ImageLayoutState
         Sprite { image: IMAGE_PATH }
         Children [
-            (
-                BsnImageConsumer { image: IMAGE_PATH }
-                ImageLayoutState
-            ),
+            BsnImageConsumer { image: IMAGE_PATH }
+            ImageLayoutState
         ]
     });
 }

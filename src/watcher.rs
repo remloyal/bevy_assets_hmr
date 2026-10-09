@@ -102,7 +102,7 @@ impl<A: Asset> AssetBind<A> {
 ///
 /// # Why this exists
 ///
-/// Bevy 0.19's blanket `impl<T: Clone + Default + Unpin> FromTemplate for T`
+/// Bevy 0.20's blanket `impl<T: Clone + Default + Unpin> FromTemplate for T`
 /// intentionally excludes `Handle<A>` (via the `SpecializeFromTemplate` auto-
 /// trait trick), forcing handle-bearing types to use a custom [`Template`].
 /// Because `AssetBind` contains a `Handle<A>`, it cannot pick up that
@@ -302,6 +302,11 @@ impl<A: Asset> AssetChanged<A> {
 }
 
 /// Event dispatched when an asset of type `A` has been **removed**.
+///
+/// Deliberately has no `Default` impl: there is no meaningful "empty" removed
+/// asset. `AssetId::default()` is not a null id (and `AssetId::invalid()` is
+/// deprecated as of Bevy 0.20), so a default-constructed event would claim that
+/// some real-looking asset id was removed. Construct the fields explicitly.
 #[derive(Message)]
 pub struct AssetRemoved<A: Asset> {
     pub asset_id: AssetId<A>,
@@ -316,17 +321,6 @@ impl<A: Asset> Clone for AssetRemoved<A> {
             asset_id: self.asset_id,
             target_entities: self.target_entities.clone(),
             source_path: self.source_path.clone(),
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<A: Asset> Default for AssetRemoved<A> {
-    fn default() -> Self {
-        Self {
-            asset_id: AssetId::default(),
-            target_entities: Vec::new(),
-            source_path: String::new(),
             _marker: std::marker::PhantomData,
         }
     }

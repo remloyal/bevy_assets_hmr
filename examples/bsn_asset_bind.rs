@@ -2,7 +2,7 @@
 //!
 //! # 背景
 //!
-//! Bevy 0.19 的 `FromTemplate` / `Template` blanket impl 要求 `T: Clone + Default + Unpin`，
+//! Bevy 0.20 的 `FromTemplate` / `Template` blanket impl 要求 `T: Clone + Default + Unpin`，
 //! 而 `Handle<A>` 通过 `SpecializeFromTemplate` auto-trait trick 被刻意排除在 `Unpin` 之外，
 //! 因此含 `Handle<A>` 的 `AssetBind<A>` 无法走 blanket，必须手写一个 `AssetBindTemplate<A>`
 //! 作为 `<AssetBind<A> as FromTemplate>::Template`（见 `src/watcher.rs`）。
@@ -41,11 +41,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         Node { width: percent(100), height: percent(100), position_type: PositionType::Absolute, overflow: Overflow::clip() }
         BackgroundColor(Color::BLACK)
         Children [
-            (
-                ImageNode { image: {asset_server.load(BG_PATH)} }
-                AssetBind<Image> { handle: {asset_server.load(BG_PATH)} }
-                Node { width: percent(100), height: percent(100), position_type: PositionType::Absolute }
-            ),
+            ImageNode { image: {asset_server.load(BG_PATH)} }
+            AssetBind<Image> { handle: {asset_server.load(BG_PATH)} }
+            Node { width: percent(100), height: percent(100), position_type: PositionType::Absolute }
         ]
     });
 
@@ -55,10 +53,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn_scene(bsn! {
         Node { width: percent(100), height: percent(100) }
         Children [
-            (
-                ImageNode { image: {handle.clone()} }
-                AssetBind<Image> { handle: {handle.clone()} }
-            ),
+            ImageNode { image: {handle.clone()} }
+            AssetBind<Image> { handle: {handle.clone()} }
         ]
     });
 

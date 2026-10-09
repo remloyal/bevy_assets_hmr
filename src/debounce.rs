@@ -51,7 +51,7 @@ impl<A: HmrSource> Default for RefreshDebouncer<A> {
         Self {
             pending: HashMap::new(),
             pending_removed: HashMap::new(),
-            window: Duration::from_millis(150),
+            window: Duration::from_millis(crate::DEFAULT_DEBOUNCE_MILLIS),
         }
     }
 }
@@ -200,7 +200,17 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 revisions.status(id),
                 Some(crate::view::AssetRevisionStatus::LoadFailed { .. })
             );
+            let was_removed = matches!(
+                revisions.status(id),
+                Some(crate::view::AssetRevisionStatus::Removed)
+            );
+            // A source we already reported as failed or removed is now
+            // (re)appearing. Subscribers have been told it went away, so this is
+            // a recovery and must be dispatched even though there is no
+            // snapshot to diff against.
+            let recovery = was_failed || was_removed;
             let had_revision = revisions.revision(id).is_some();
+            let first_load = !snapshots.map.contains_key(&id);
 
             let (delta, diff_kind) = match snapshots.map.get(&id) {
                 Some(old_raw) => {
@@ -217,17 +227,8 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                         kind,
                     )
                 }
-                None => {
-                    // First load: initialize the snapshot and skip dispatch.
-                    // Subscribers should not see a spurious "first load" refresh.
-                    metrics.record_config_clone(new_raw);
-                    snapshots.map.insert(id, new_raw.clone());
-                    snapshots
-                        .source_paths
-                        .insert(id, new_asset.source_path().to_string());
-                    revisions.record_available(id);
-                    continue;
-                }
+                // No previous version to diff against.
+                None => (ConfigDelta::default(), DiffKind::Modified),
             };
 
             // Update snapshot to the new version (regardless of whether we dispatch).
@@ -237,9 +238,19 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 .source_paths
                 .insert(id, new_asset.source_path().to_string());
 
-            // Same-content inserts are normally ignored. After a load
-            // failure, however, an empty diff still represents recovery.
-            if delta.is_empty() && !was_failed {
+            // A successful *first* load is not a refresh - subscribers should not
+            // see a spurious "first load" event. It *is* a recovery, however, when
+            // this id was already reported as failed or removed: without a
+            // dispatch the subscriber would never learn that the config is
+            // available, leaving it stuck on its "missing data" state.
+            if first_load && !recovery {
+                revisions.record_available(id);
+                continue;
+            }
+
+            // Same-content inserts are normally ignored. After a failure or
+            // removal, however, an empty diff still represents recovery.
+            if delta.is_empty() && !recovery {
                 if !had_revision {
                     revisions.record_available(id);
                 }
@@ -277,7 +288,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 } else {
                     diff_kind
                 },
-                cause: if was_failed {
+                cause: if recovery {
                     RefreshCause::Recovery
                 } else {
                     RefreshCause::Direct
@@ -285,7 +296,7 @@ pub fn flush_debounced_refresh<A: HmrSource>(
                 source_path: new_asset.source_path().to_string(),
             });
             metrics.refreshes_dispatched += 1;
-            if was_failed {
+            if recovery {
                 metrics.recoveries_dispatched += 1;
             }
 

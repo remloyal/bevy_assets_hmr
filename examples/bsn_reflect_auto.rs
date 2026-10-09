@@ -49,11 +49,9 @@ fn spawn_scene(mut commands: Commands) {
         }
         Sprite { image: BASE_COLOR }
         Children [
-            (
-                BsnRenderComponent {
-                    base_color: BASE_COLOR,
-                }
-            ),
+            BsnRenderComponent {
+                base_color: BASE_COLOR,
+            }
         ]
     });
 }

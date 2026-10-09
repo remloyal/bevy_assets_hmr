@@ -1,4 +1,4 @@
-//! Semantic config change and asset-impact propagation for Bevy 0.19.
+//! Semantic config change and asset-impact propagation for Bevy 0.20.
 //!
 //! Bevy's `AssetServer` remains responsible for watching, loading, and replacing
 //! assets. This crate adds targeted, diff-based refresh semantics for RON/JSON
@@ -88,6 +88,11 @@ pub use bevy_assets_hmr_derive::HmrAutoWatch;
 use bevy::prelude::*;
 use std::time::Duration;
 
+/// Default debounce window (milliseconds) used to merge rapid business
+/// dispatches per asset, shared by [`ConfigHmrPlugin`], the per-type
+/// [`crate::RefreshDebouncer`] and the registration helpers' fallback.
+pub(crate) const DEFAULT_DEBOUNCE_MILLIS: u64 = 150;
+
 /// HMR plugin. Add to your `App` once, then call
 /// [`App::register_config`](ConfigHmrAppExt::register_config) for each
 /// config type you want to hot-reload.
@@ -111,7 +116,7 @@ pub struct ConfigHmrPlugin {
 impl Default for ConfigHmrPlugin {
     fn default() -> Self {
         Self {
-            debounce_window: Duration::from_millis(150),
+            debounce_window: Duration::from_millis(DEFAULT_DEBOUNCE_MILLIS),
         }
     }
 }

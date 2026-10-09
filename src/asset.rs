@@ -6,7 +6,7 @@ use bevy::reflect::TypePath;
 
 /// Wraps a parsed config `T` together with its source path.
 ///
-/// `T` must be an `Asset` itself (Bevy 0.19 `Asset` derive requires this).
+/// `T` must be an `Asset` itself (Bevy 0.20 `Asset` derive requires this).
 /// The consuming crate is responsible for defining `T` (e.g. `NpcDatabase`)
 /// with `#[derive(Asset, TypePath, Serialize, Deserialize, Clone, PartialEq)]`.
 ///
