@@ -20,7 +20,7 @@ use bevy::prelude::*;
 use bevy_assets_hmr::ConfigWatchAppExt;
 use serde::Deserialize;
 
-#[derive(Resource, Deserialize, Default)]
+#[derive(Resource, Deserialize, PartialEq, Default)]
 struct Settings {
     title: String,
 }
@@ -46,33 +46,38 @@ fn use_settings(settings: Res<Settings>) {
 ## 多格式
 
 ```rust
-app.watch_config::<Settings>("data/settings.ron")   // ron::from_str
-   .watch_config::<Server>("data/server.json")      // serde_json::from_str
-   .watch_config_with::<Theme, _>("data/theme.toml", |text| {
+app.watch_config::<Settings>("data/settings.ron")   // ron::de::from_bytes
+   .watch_config::<Server>("data/server.json")      // serde_json::from_slice
+   // 解析函数拿到的是原始 &[u8]：文本格式自行 from_utf8，二进制格式也可用
+   .watch_config_with::<Theme, _>("data/theme.toml", |bytes| {
+       let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
        toml::from_str(text).map_err(|error| error.to_string())
    });
 ```
 
 | 扩展名 | 解析器 |
 |---|---|
-| `.ron` | `ron::from_str` |
-| `.json` | `serde_json::from_str` |
-| 其它 | 必须用 `watch_config_with` 提供解析函数；直接 `watch_config` 会 panic 并提示 |
+| `.ron` | `ron::de::from_bytes` |
+| `.json` | `serde_json::from_slice` |
+| 其它 | 必须用 `watch_config_with` 提供解析函数（收到原始字节）；直接 `watch_config` 会 panic 并提示 |
 
 ## 对配置类型的要求
 
-`T` 需要 `Resource + Deserialize + Default`：
+`T` 需要 `Resource + Deserialize + PartialEq + Default`：
 
 - `Deserialize`：解析文件；
 - `Resource`：让值能存在于世界中；
+- `PartialEq`：重载时用来判断解析后的值是否真的变了（见下"精准变更"）；
 - `Default`：在首次加载成功之前 `Res<T>` 也能解析（此时读到 `T::default()`，
   文件缺失会写一条 warning 日志）。这样消费方不需要 `Option<Res<T>>`，
   也不会因为资源不存在而 panic。
 
+`watch_config_with`（自定义格式）只去掉 `Deserialize`，仍需要 `Resource + PartialEq + Default`。
+
 ## 行为
 
 - **自动加载**：注册的类型在 app 第一次 update 时即加载文件，无需单独的 Startup 步骤。
-- **变更检测**：文件每次轮询都会重新读取并与上一版文本比较（不依赖文件系统 mtime 精度）。只有加载成功才重新插入资源，因此 `Res::is_changed()` 只在真正热更新时触发，不会空转。
+- **精准变更**：文件每次轮询都会重新读取并与上一版字节比较（不依赖文件系统 mtime 精度），解析后的值再与世界里当前的值比较，**只有真的不同才重新插入资源**。因此改空格/注释、或改 `T` 里没有（被 serde 忽略）的字段，都不会触发 `Res::is_changed()`。
 - **防抖**：默认每 150ms 轮询一次，天然合并编辑器的原子写入（删除 + 重命名）。
 - **出错不丢数据**：解析失败或文件暂时缺失时，上一份合法值仍保留在世界里，错误写入日志（`bevy::log`）；文件修好后自动恢复。
 - **一个类型一个文件**：同一个 `T` 重复注册会打 warning 并忽略第二个路径。
@@ -81,10 +86,15 @@ app.watch_config::<Settings>("data/settings.ron")   // ron::from_str
 
 | 项 | 说明 |
 |---|---|
-| `App::watch_config::<T>(path)` | 按扩展名（`.ron`/`.json`）注册要监听的文件。`T` 需实现 `Resource + Deserialize + Default`。 |
-| `App::watch_config_with::<T, F>(path, parser)` | 自定义格式，`parser: Fn(&str) -> Result<T, String>`。 |
+| `App::watch_config::<T>(path)` | 按扩展名（`.ron`/`.json`）注册要监听的文件。`T` 需实现 `Resource + Deserialize + PartialEq + Default`。 |
+| `App::watch_config_with::<T, F>(path, parser)` | 自定义格式，`parser: Fn(&[u8]) -> Result<T, String>`（原始字节，文本/二进制均可）。`T` 无需 `Deserialize`，但仍需 `Resource + PartialEq + Default`。 |
 | `ConfigWatchPlugin` | 可选插件，用于自定义 `root`（默认 `assets`）与 `poll_interval`（默认 150ms）。须在注册之前添加。 |
 | `DEFAULT_ROOT` / `DEFAULT_POLL_INTERVAL` | 上述默认值常量。 |
+
+## 已知行为与权衡
+
+- **按值精准，但不是字段级**：变更检测落在"解析后的整个 `T` 是否不同"这一级。改空格/注释/被忽略字段不会触发；但只要 `T` 里任何一个字段变了，整个资源就重新插入、`is_changed()` 触发——Bevy 的 `Res<T>` 本身就是整值变更检测，做不到"只挑 title 触发"。若确实需要字段级，需要 diff + 消费侧订阅，属于额外机制。
+- **主线程同步读取**：为不依赖文件系统 mtime 精度，每次轮询都会真正读一遍文件（默认 150ms 一次）。配置文件很小，开销可忽略；文件很大/很多或位于网络盘时需注意。
 
 ## 说明
 

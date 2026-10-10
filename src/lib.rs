@@ -14,7 +14,7 @@
 //! use bevy_assets_hmr::ConfigWatchAppExt;
 //! use serde::Deserialize;
 //!
-//! #[derive(Resource, Deserialize, Default)]
+//! #[derive(Resource, Deserialize, PartialEq, Default)]
 //! struct Settings {
 //!     title: String,
 //! }
@@ -39,22 +39,25 @@
 //!
 //! # Formats
 //!
-//! - `.ron` → `ron::from_str`
-//! - `.json` → `serde_json::from_str`
-//! - anything else → register with [`watch_config_with`] and supply a parser:
+//! - `.ron` → `ron::de::from_bytes`
+//! - `.json` → `serde_json::from_slice`
+//! - anything else → register with [`watch_config_with`] and supply a parser
+//!   over raw bytes (text parsers decode with `std::str::from_utf8`):
 //!
 //! ```no_run
 //! # use bevy::prelude::*;
 //! # use bevy_assets_hmr::ConfigWatchAppExt;
-//! #[derive(Resource, Default)]
+//! #[derive(Resource, PartialEq, Default)]
 //! struct Volume {
 //!     level: u32,
 //! }
 //!
 //! App::new()
 //!     .add_plugins(MinimalPlugins)
-//!     // no `toml` dependency here — the parser is entirely yours
-//!     .watch_config_with::<Volume, _>("data/volume.txt", |text| {
+//!     // parsers receive raw bytes, so binary formats work too;
+//!     // text formats decode with `std::str::from_utf8`
+//!     .watch_config_with::<Volume, _>("data/volume.txt", |bytes| {
+//!         let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
 //!         text.trim()
 //!             .parse::<u32>()
 //!             .map(|level| Volume { level })
@@ -73,24 +76,30 @@
 //! - **Errors do not lose data**: a parse error or a temporarily missing file
 //!   keeps the last valid value and logs a warning/error. Fixing the file
 //!   recovers automatically.
-//! - **Change detection is content-based**: the file is re-read each poll and
-//!   compared to the previous text, so edits are detected regardless of
-//!   filesystem mtime granularity. `T` is only re-inserted when a load
-//!   succeeds, so `Res<T>::is_changed` never fires spuriously.
+//! - **Value-precise change detection**: the file is re-read each poll and
+//!   compared with the previous bytes (so edits are seen regardless of
+//!   filesystem mtime granularity), and the parsed value is then compared with
+//!   the one in the world. `T` is re-inserted only when it actually differs —
+//!   editing whitespace, comments, or fields `T` ignores does not fire
+//!   `Res<T>::is_changed`. This is whole-value precision, not per-field:
+//!   changing any field of `T` still fires it.
 //!
 //! # Requirements on `T`
 //!
 //! For [`watch_config`](ConfigWatchAppExt::watch_config), `T` must be
-//! `Resource + Deserialize + Default`:
+//! `Resource + Deserialize + PartialEq + Default`:
 //! - `Deserialize` to parse the file.
 //! - `Resource` so the value can live in the world.
+//! - `PartialEq` so a reload can tell whether the parsed value actually
+//!   changed.
 //! - `Default` so that `Res<T>` resolves even before the first successful
 //!   load (you then read `T::default()`; the watcher logs a warning when the
 //!   file is missing). This avoids `Option<Res<T>>` in consumers and any
 //!   runtime panic from a missing resource.
 //!
-//! [`watch_config_with`](ConfigWatchAppExt::watch_config_with) keeps only the
-//! `Resource + Default` requirements — a custom parser needs no `Deserialize`.
+//! [`watch_config_with`](ConfigWatchAppExt::watch_config_with) drops only the
+//! `Deserialize` requirement — a custom parser still needs
+//! `Resource + PartialEq + Default`.
 //!
 //! # One file per type
 //!
@@ -122,15 +131,17 @@ pub trait ConfigWatchAppExt {
     ///
     /// Panics if the extension is neither `.ron` nor `.json`. Use
     /// [`watch_config_with`](Self::watch_config_with) for other formats.
-    fn watch_config<T: Resource + DeserializeOwned + Default + Send + Sync + 'static>(
+    fn watch_config<T: Resource + DeserializeOwned + PartialEq + Default + Send + Sync + 'static>(
         &mut self,
         path: &str,
     ) -> &mut Self;
 
     /// Watch a config file using a caller-supplied parser.
     ///
-    /// The parser receives the file's full text and returns either the parsed
+    /// The parser receives the file's raw bytes and returns either the parsed
     /// value or an error message (logged, with the last good value kept).
+    /// Receiving bytes (not `&str`) means binary formats work too; text
+    /// parsers decode with `std::str::from_utf8`.
     ///
     /// Unlike [`watch_config`](Self::watch_config), `T` does **not** need to
     /// implement `Deserialize` — the parser is entirely yours.
@@ -138,13 +149,14 @@ pub trait ConfigWatchAppExt {
     /// ```no_run
     /// # use bevy::prelude::*;
     /// # use bevy_assets_hmr::ConfigWatchAppExt;
-    /// #[derive(Resource, Default)]
+    /// #[derive(Resource, PartialEq, Default)]
     /// struct Volume {
     ///     level: u32,
     /// }
     ///
     /// # let mut app = App::new();
-    /// app.watch_config_with::<Volume, _>("data/volume.txt", |text| {
+    /// app.watch_config_with::<Volume, _>("data/volume.txt", |bytes| {
+    ///     let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
     ///     text.trim()
     ///         .parse::<u32>()
     ///         .map(|level| Volume { level })
@@ -153,12 +165,12 @@ pub trait ConfigWatchAppExt {
     /// ```
     fn watch_config_with<T, F>(&mut self, path: &str, parser: F) -> &mut Self
     where
-        T: Resource + Default + Send + Sync + 'static,
-        F: Fn(&str) -> Result<T, String> + Send + Sync + 'static;
+        T: Resource + PartialEq + Default + Send + Sync + 'static,
+        F: Fn(&[u8]) -> Result<T, String> + Send + Sync + 'static;
 }
 
 impl ConfigWatchAppExt for App {
-    fn watch_config<T: Resource + DeserializeOwned + Default + Send + Sync + 'static>(
+    fn watch_config<T: Resource + DeserializeOwned + PartialEq + Default + Send + Sync + 'static>(
         &mut self,
         path: &str,
     ) -> &mut Self {
@@ -175,8 +187,8 @@ impl ConfigWatchAppExt for App {
 
     fn watch_config_with<T, F>(&mut self, path: &str, parser: F) -> &mut Self
     where
-        T: Resource + Default + Send + Sync + 'static,
-        F: Fn(&str) -> Result<T, String> + Send + Sync + 'static,
+        T: Resource + PartialEq + Default + Send + Sync + 'static,
+        F: Fn(&[u8]) -> Result<T, String> + Send + Sync + 'static,
     {
         watch::install(
             self,

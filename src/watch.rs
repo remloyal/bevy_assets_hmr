@@ -2,11 +2,11 @@
 //! and write the parsed value straight into the world as a resource of the
 //! user's own type `T`.
 //!
-//! Parsing is captured at registration as a boxed closure: `.ron` / `.json`
-//! get a built-in parser chosen from the extension, and
+//! Parsing is captured at registration as a boxed closure over raw bytes:
+//! `.ron` / `.json` get a built-in parser chosen from the extension, and
 //! [`watch_config_with`](crate::ConfigWatchAppExt::watch_config_with) supplies
-//! any custom one. The polling machinery is therefore format-agnostic and does
-//! not require `T: Deserialize`.
+//! any custom one. Working on bytes (not `&str`) means binary formats are
+//! supported too; text parsers just decode with `std::str::from_utf8`.
 
 use bevy::app::App;
 use bevy::prelude::{Commands, First, Local, Plugin, Res, Resource};
@@ -41,15 +41,15 @@ impl Default for WatchSettings {
 #[derive(Resource)]
 pub(crate) struct WatchRegistration<T> {
     pub(crate) path: String,
-    pub(crate) parse: Box<dyn Fn(&str) -> Result<T, String> + Send + Sync>,
+    pub(crate) parse: Box<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync>,
 }
 
 /// Poll state kept per registered type (via `Local`).
 #[derive(Default)]
 pub(crate) struct PollState {
-    /// Raw text of the last read, used to detect content changes without
+    /// Raw bytes of the last read, used to detect content changes without
     /// relying on filesystem mtime granularity.
-    pub(crate) last_raw: Option<String>,
+    pub(crate) last_bytes: Option<Vec<u8>>,
     /// Whether the file existed on the last poll.
     pub(crate) present: bool,
     /// Whether a "file missing" warning has already been logged, so a missing
@@ -106,16 +106,18 @@ impl Plugin for ConfigWatchPlugin {
 /// `watch_config_with`.
 pub(crate) fn builtin_parser<T: DeserializeOwned + 'static>(
     path: &str,
-) -> Box<dyn Fn(&str) -> Result<T, String> + Send + Sync> {
+) -> Box<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync> {
     match Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("ron") => Box::new(|text| ron::from_str::<T>(text).map_err(|error| error.to_string())),
+        Some("ron") => {
+            Box::new(|bytes| ron::de::from_bytes::<T>(bytes).map_err(|error| error.to_string()))
+        }
         Some("json") => {
-            Box::new(|text| serde_json::from_str::<T>(text).map_err(|error| error.to_string()))
+            Box::new(|bytes| serde_json::from_slice::<T>(bytes).map_err(|error| error.to_string()))
         }
         other => panic!(
             "[HMR] 不支持的配置扩展名 {other:?}（路径 `{path}`）。\
@@ -125,7 +127,7 @@ pub(crate) fn builtin_parser<T: DeserializeOwned + 'static>(
 }
 
 /// Install the watcher resources and system for `T`.
-pub(crate) fn install<T: Resource + Default + Send + Sync + 'static>(
+pub(crate) fn install<T: Resource + PartialEq + Default + Send + Sync + 'static>(
     app: &mut App,
     registration: WatchRegistration<T>,
 ) {
@@ -152,11 +154,13 @@ pub(crate) fn install<T: Resource + Default + Send + Sync + 'static>(
 /// file content changes.
 ///
 /// Runs in [`First`](bevy::prelude::First) so systems in later schedules see
-/// the current frame's value. The resource is only (re)inserted when a load
-/// succeeds, so [`Res::is_changed`] fires exactly on reloads.
-pub(crate) fn poll_config<T: Resource + Default + Send + Sync + 'static>(
+/// the current frame's value. The parsed value is compared with the one
+/// already in the world, and the resource is only re-inserted when it actually
+/// differs, so [`Res::is_changed`] fires only on a real change.
+pub(crate) fn poll_config<T: Resource + PartialEq + Default + Send + Sync + 'static>(
     settings: Res<WatchSettings>,
     registration: Res<WatchRegistration<T>>,
+    current: Res<T>,
     mut last_run: Local<Option<Instant>>,
     mut state: Local<PollState>,
     mut commands: Commands,
@@ -170,26 +174,31 @@ pub(crate) fn poll_config<T: Resource + Default + Send + Sync + 'static>(
     *last_run = Some(now);
 
     let full_path = settings.root.join(&registration.path);
-    match fs::read_to_string(&full_path) {
-        Ok(raw) => {
-            if state.present && state.last_raw.as_deref() == Some(raw.as_str()) {
+    match fs::read(&full_path) {
+        Ok(bytes) => {
+            if state.present && state.last_bytes.as_deref() == Some(bytes.as_slice()) {
                 return;
             }
             state.missing_warned = false;
-            match (registration.parse)(&raw) {
+            match (registration.parse)(&bytes) {
                 Ok(value) => {
-                    commands.insert_resource(value);
-                    state.last_raw = Some(raw);
+                    state.last_bytes = Some(bytes);
                     state.present = true;
+                    // Only re-insert when the parsed value actually changed:
+                    // whitespace/comment edits, or edits to fields `T` ignores,
+                    // parse to an equal value and must not fire `is_changed`.
+                    if &*current != &value {
+                        commands.insert_resource(value);
+                    }
                 }
                 Err(error) => {
-                    // Keep the previously loaded value; record the raw text so
+                    // Keep the previously loaded value; record the raw bytes so
                     // an unchanged broken file is not re-parsed every poll.
                     bevy::log::error!(
                         "[HMR] {} 解析失败（保留上一份值）: {error}",
                         full_path.display()
                     );
-                    state.last_raw = Some(raw);
+                    state.last_bytes = Some(bytes);
                     state.present = true;
                 }
             }

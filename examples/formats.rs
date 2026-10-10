@@ -29,8 +29,9 @@ struct KeyValues {
     volume: u32,
 }
 
-/// 极简 `key = value` 解析器，演示 `watch_config_with`。
-fn parse_ini(text: &str) -> Result<KeyValues, String> {
+/// 极简 `key = value` 解析器，演示 `watch_config_with`（拿到的是原始字节）。
+fn parse_ini(bytes: &[u8]) -> Result<KeyValues, String> {
+    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
     let mut values = KeyValues::default();
     for line in text.lines() {
         let line = line.trim();

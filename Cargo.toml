@@ -2,13 +2,14 @@
 name = "bevy_assets_hmr"
 version = "0.0.1"
 edition = "2024"
-description = "Minimal RON file hot-reload for Bevy 0.20: watch a RON file, read it from a Resource anywhere."
+rust-version = "1.85"
+description = "Minimal config-file hot-reload for Bevy 0.20: watch a RON/JSON (or custom-format) file and read it from a Resource anywhere."
 license = "MIT"
 authors = ["remloyal <remloyal@163.com>"]
 readme = "README.md"
 homepage = "https://github.com/remloyal/bevy_assets_hmr"
 repository = "https://github.com/remloyal/bevy_assets_hmr"
-keywords = ["bevy", "hmr", "hot-reload", "ron", "config"]
+keywords = ["bevy", "hmr", "hot-reload", "config", "ron"]
 categories = ["game-development"]
 
 [dependencies]

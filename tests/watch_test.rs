@@ -37,6 +37,21 @@ fn app_for(dir: &PathBuf) -> App {
     app
 }
 
+/// Counts how many times the `Settings` resource was observed as changed.
+#[derive(Resource, Default)]
+struct ChangeCount(u32);
+
+fn count_changes(settings: Res<Settings>, mut count: ResMut<ChangeCount>) {
+    if settings.is_changed() {
+        count.0 += 1;
+    }
+}
+
+fn add_change_counter(app: &mut App) {
+    app.init_resource::<ChangeCount>();
+    app.add_systems(Update, count_changes);
+}
+
 // ---------------------------------------------------------------------------
 // RON (extension-detected)
 // ---------------------------------------------------------------------------
@@ -143,22 +158,12 @@ fn second_watch_for_same_type_is_ignored() {
 
 #[test]
 fn unchanged_poll_does_not_mark_resource_changed() {
-    #[derive(Resource, Default)]
-    struct ChangeCount(u32);
-
-    fn count_changes(settings: Res<Settings>, mut count: ResMut<ChangeCount>) {
-        if settings.is_changed() {
-            count.0 += 1;
-        }
-    }
-
     let dir = make_dir("no_spurious_change");
     std::fs::write(dir.join("settings.ron"), V1).unwrap();
 
     let mut app = app_for(&dir);
     app.watch_config::<Settings>("settings.ron");
-    app.init_resource::<ChangeCount>();
-    app.add_systems(Update, count_changes);
+    add_change_counter(&mut app);
 
     app.update(); // initial load -> one change
     app.update(); // nothing changed on disk -> no change
@@ -167,6 +172,76 @@ fn unchanged_poll_does_not_mark_resource_changed() {
     assert_eq!(app.world().resource::<ChangeCount>().0, 1);
 
     std::fs::write(dir.join("settings.ron"), V2).unwrap();
+    app.update();
+    assert_eq!(app.world().resource::<ChangeCount>().0, 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn whitespace_only_change_does_not_fire() {
+    let dir = make_dir("whitespace_only");
+    std::fs::write(dir.join("settings.ron"), r#"(title:"Hello",max_players:4)"#).unwrap();
+
+    let mut app = app_for(&dir);
+    app.watch_config::<Settings>("settings.ron");
+    add_change_counter(&mut app);
+
+    app.update(); // initial load -> 1
+    assert_eq!(app.world().resource::<ChangeCount>().0, 1);
+
+    // Same values, only formatting/comments differ.
+    std::fs::write(
+        dir.join("settings.ron"),
+        "(title: \"Hello\", max_players: 4) // comment\n",
+    )
+    .unwrap();
+    app.update();
+    assert_eq!(
+        app.world().resource::<ChangeCount>().0,
+        1,
+        "whitespace/comment-only edit must not fire is_changed"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ignored_field_change_does_not_fire() {
+    let dir = make_dir("ignored_field");
+    // `Settings` has no `extra` field, so serde ignores it.
+    std::fs::write(
+        dir.join("settings.ron"),
+        r#"(title: "Hello", max_players: 4, extra: 1)"#,
+    )
+    .unwrap();
+
+    let mut app = app_for(&dir);
+    app.watch_config::<Settings>("settings.ron");
+    add_change_counter(&mut app);
+
+    app.update(); // initial load -> 1
+    assert_eq!(app.world().resource::<ChangeCount>().0, 1);
+
+    // Only the ignored field changes.
+    std::fs::write(
+        dir.join("settings.ron"),
+        r#"(title: "Hello", max_players: 4, extra: 999)"#,
+    )
+    .unwrap();
+    app.update();
+    assert_eq!(
+        app.world().resource::<ChangeCount>().0,
+        1,
+        "changing a field `Settings` ignores must not fire is_changed"
+    );
+
+    // A field `Settings` does have still fires.
+    std::fs::write(
+        dir.join("settings.ron"),
+        r#"(title: "Hello", max_players: 8, extra: 999)"#,
+    )
+    .unwrap();
     app.update();
     assert_eq!(app.world().resource::<ChangeCount>().0, 2);
 
@@ -214,7 +289,8 @@ struct KeyValues {
     volume: u32,
 }
 
-fn parse_ini(text: &str) -> Result<KeyValues, String> {
+fn parse_ini(bytes: &[u8]) -> Result<KeyValues, String> {
+    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
     let mut values = KeyValues::default();
     for line in text.lines() {
         let line = line.trim();
@@ -231,6 +307,37 @@ fn parse_ini(text: &str) -> Result<KeyValues, String> {
         }
     }
     Ok(values)
+}
+
+/// A parser over raw bytes, for a format that is *not* valid UTF-8.
+#[derive(Resource, Debug, PartialEq, Default)]
+struct RawConfig {
+    value: u8,
+}
+
+fn parse_raw(bytes: &[u8]) -> Result<RawConfig, String> {
+    match bytes {
+        [0xFF, value, ..] => Ok(RawConfig { value: *value }),
+        _ => Err(format!("bad raw config: {bytes:?}")),
+    }
+}
+
+#[test]
+fn custom_parser_supports_binary_bytes() {
+    let dir = make_dir("binary");
+    // 0xFF is not valid UTF-8: the old `read_to_string` path could not read it.
+    std::fs::write(dir.join("blob.bin"), [0xFFu8, 7]).unwrap();
+
+    let mut app = app_for(&dir);
+    app.watch_config_with::<RawConfig, _>("blob.bin", parse_raw);
+    app.update();
+    assert_eq!(app.world().resource::<RawConfig>().value, 7);
+
+    std::fs::write(dir.join("blob.bin"), [0xFFu8, 9]).unwrap();
+    app.update();
+    assert_eq!(app.world().resource::<RawConfig>().value, 9);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

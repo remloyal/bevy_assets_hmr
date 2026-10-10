@@ -43,6 +43,9 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
+      - name: Doc tests
+        run: cargo test --doc --locked
+
   publish:
     name: Publish crates.io package
     if: startsWith(github.ref, 'refs/tags/v')

@@ -1,5 +1,0 @@
-(
-    items: [
-        (id: "broken", n: not_a_number),
-    ],
-)
