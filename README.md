@@ -1,944 +1,104 @@
 # bevy_assets_hmr
 
-建立在 Bevy 0.20 原生 Asset 热重载之上的**配置语义变更与资产影响传播层**。
+极简的 **配置文件热重载** 插件（Bevy 0.20）。
 
-Bevy 负责监听文件、重新加载 Asset、保持 Handle 稳定并更新渲染资源；`bevy_assets_hmr`
-负责解释“资产变化后业务上发生了什么”：配置表中哪些条目变化、哪些实体受影响，以及
-哪些派生状态需要重建。
+只需要注册要监听的文件；文件在磁盘上变化后，值会被原地写回世界。
+消费侧没有任何包装类型、事件或钩子——你的配置类型本身就是 `Resource`，
+在任何地方 `Res<你的类型>` 即可。
 
-当配置文件变更时，不再是"整表重载 + 全局刷新"，而是：
-
-1. **Diff**：对比新旧版本，只算出 `added / removed / modified` 三组 id
-2. **Debounce**：批处理短时间内的多次写入（如原子写：删除 + 重命名）
-3. **Dispatch**：派发 `ConfigRefresh<T>` 事件，携带 `changed_ids` 和 `target_entities`
-4. **Subscribe**：业务系统按 id / 实体精准过滤，只刷新真正受影响的对象
-
-## 与 Bevy 原生热重载的关系
-
-Bevy 的 `AssetServer` + `bevy/file_watcher` 已提供文件监听、文件事件防抖、`AssetLoadFailedEvent`、Handle 原位替换和 loader dependency 重载。本插件不重复宣称这些能力；它处理资产替换后的业务层问题：配置表内部哪些 ID 变化、哪些实体受影响、依赖刷新由谁触发，以及隐藏页面何时补同步。插件额外提供的 150ms 窗口只用于按 AssetId 合并 HMR 派发，不代替 Bevy 的文件监听防抖。
-
-**只使用原生事件：业务层仍需手动保存快照、计算 diff 和路由影响范围**
-
-```rust
-// 需要自己保存旧版本做 diff
-fn on_asset_event(
-    mut events: EventReader<AssetEvent<NpcDatabase>>,
-    assets: Res<Assets<NpcDatabase>>,
-) {
-    for evt in events.read() {
-        let AssetEvent::Modified { id } = evt else { continue };
-        let Some(new_db) = assets.get(*id) else { continue };
-        // 自己比对新旧、算变更集、找实体、去重……
-    }
-}
-```
-
-**bevy_assets_hmr：一行注册，自动完成**
-
-```rust
-app.add_plugins(ConfigHmrPlugin::default());
-app.register_config::<NpcDatabase>("data/npc.ron");
-// ↑ 自动加载配置、计算 diff、合并业务派发并发送 ConfigRefresh<T>
-```
-
-| 能力 | 原生方案 | bevy_assets_hmr |
-|---|---|---|
-| 文件监听与 Asset 重载 | ✅ 需启用 `bevy/file_watcher` | 复用 Bevy，不重复实现 |
-| 变更检测 | `AssetEvent::Modified`（整表） | 自动 diff（added/removed/modified） |
-| 文件事件防抖 | ✅ Bevy file watcher 已提供 | ✅ 复用原生能力，并按 AssetId 合并业务派发（默认 150ms） |
-| 加载失败 | ✅ `AssetLoadFailedEvent` | ✅ 转发为携带旧快照和绑定实体的 `ConfigReloadFailed` |
-| 实体绑定追踪 | ❌ 自己维护 `HashMap` | ✅ `ConfigBind<A>` / `AssetBind<A>` 自动追踪 |
-| 按 id 精准刷新 | ❌ 自己写过滤逻辑 | ✅ `changed_ids` 直接筛选 |
-| 多类型支持 | 每种类型手动注册 | ✅ 链式注册，类型独立 |
-
-## 特性
-
-- **两种接入模式**：
-  - **包装模式** `register_config::<T>()`：框架用 `ConfigLoader` 加载 ron/json，包成 `ConfigAsset<T>`
-  - **直接模式** `register_asset::<A>()`：用户用自己的 `AssetLoader`，Asset 本身就是 Config
-- **一行接入**：`add_plugins(ConfigHmrPlugin)` + `register_config` / `register_asset`，自动加载文件 + 持有 handle
-- **derive 宏**：`#[derive(ConfigDiff)]` + `#[config_diff(field, id)]`，一行实现 diff trait
-- **自动追踪**：`ConfigBind<A>` 组件自动维护 handle↔entity 缓存
-- **自动快照**：首次加载自动初始化快照，不派发"首次加载"事件
-- **自动 diff + 派发**：文件变更后自动 diff + debounce + 派发 `ConfigRefresh<T>`
-- **多类型并存**：一个 App 可注册多种类型，各自独立 diff、独立订阅
-- **Bevy 0.20 适配**：`Message` / `MessageReader` / `MessageWriter`，`Asset` + `TypePath`
+内置支持 `.ron` 和 `.json`（按扩展名自动选择），其它格式用 `watch_config_with` 传入解析函数。
 
 ## 快速开始
 
-### 1. 添加依赖
-
 ```toml
 [dependencies]
-bevy_assets_hmr = { git  = "https://github.com/remloyal/bevy_assets_hmr" }
-
-[features]
-# 启用 bevy 原生文件监听（修改 assets/*.ron 自动 reload）
-hmr = ["bevy/file_watcher"]
+bevy_assets_hmr = { git = "https://github.com/remloyal/bevy_assets_hmr" }
 ```
-
-> **生产环境优化**：本库默认启用 HMR 运行时系统（`dev` feature）。
-> 发布时通过 `--no-default-features` 可编译期禁用本 crate 的扫描、diff 和派发系统，
-> 避免这些系统的运行时开销：
->
-> ```toml
-> [dependencies]
-> bevy_assets_hmr = { git = "https://github.com/remloyal/bevy_assets_hmr", default-features = false }
-> ```
->
-> 此时注册所需的 Asset、Resource 和 Message 仍会初始化，配置也仍可正常加载；是否继续
-> 监听文件变化由消费方是否启用 `bevy/file_watcher` 决定。本 crate 不再执行扫描、diff
-> 和业务事件派发。
-
-### 2. 定义 Asset + 实现 ConfigDiff
-
-#### 模式 A：包装模式（配置数据表）
-
-适用于 ron/json 配置表，框架用 `ConfigLoader` 加载，包成 `ConfigAsset<T>`。
-
-```rust
-use bevy::asset::Asset;
-use bevy::reflect::TypePath;
-use bevy_assets_hmr::ConfigDiff;
-use serde::{Deserialize, Serialize};
-
-/// `#[derive(ConfigDiff)]` 自动实现基于 `npcs` 字段的 diff，
-/// 以 `NpcEntry.id` 作为条目唯一标识。
-///
-/// # 约束
-/// - `PartialEq`：diff 检测 modified 条目
-/// - `id` 字段的 `Eq + Hash + Clone`：用于建立条目索引
-#[derive(
-    Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff,
-)]
-#[config_diff(field = "npcs", id = "id")]
-pub struct NpcDatabase {
-    pub npcs: Vec<NpcEntry>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NpcEntry {
-    pub id: String,
-    pub name: String,
-    pub hp: u32,
-}
-```
-
-`#[config_diff]` 的选项：
-- `field = "npcs"`：指定 `Vec<Entry>` 字段名（省略时自动找第一个 `Vec<_>` 字段）
-- `id = "id"`：指定 entry 的 id 字段名（省略时默认 `"id"`）
-
-derive 和 `impl_config_diff!` 都会先建立 `ID -> &Entry` HashMap，added、removed、modified 的整体计算平均为 O(n)。同一版本中出现重复 ID 时会记录 error，并把重复 ID 归入 modified，避免静默选择任意条目。
-
-对于非 Vec 模式（如单对象配置 `UiTheme`），手动实现 `ConfigDiff`：
-
-```rust
-use bevy_assets_hmr::SimpleConfigDiff;
-
-impl SimpleConfigDiff for UiTheme {
-    fn diff_id() -> &'static str { "theme" }
-}
-```
-
-#### 模式 B：直接模式（自定义 Asset + 自定义 Loader）
-
-适用于已有自定义 `AssetLoader`，且 Asset 本身具有可比较配置语义的类型（如自定义关卡或
-二进制配置格式）。Bevy 内置 `Image`、`AudioSource`、`Mesh` 等普通资产通常使用
-`watch_asset::<A>()` 接收业务影响通知，不使用 `register_asset::<A>()`。
-
-```rust
-use bevy::asset::{Asset, AssetLoader, io::Reader, LoadContext};
-use bevy::reflect::TypePath;
-use bevy_assets_hmr::{HmrSource, SimpleConfigDiff};
-use serde::{Deserialize, Serialize};
-
-#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
-struct LevelAsset {
-    id: String,
-    name: String,
-    max_turns: u32,
-}
-
-// 1. 实现 ConfigDiff（和模式 A 一样）
-impl SimpleConfigDiff for LevelAsset {
-    fn diff_id() -> &'static str { "level" }
-}
-
-// 2. 实现 HmrSource：Asset 本身就是 Config，直接返回 self
-impl HmrSource for LevelAsset {
-    type Config = LevelAsset;
-    fn config(&self) -> &Self::Config { self }
-}
-
-// 3. 用户自己的 Loader（和 bevy 官方 custom_asset.rs 一样）
-struct LevelAssetLoader;
-impl AssetLoader for LevelAssetLoader {
-    type Asset = LevelAsset;
-    type Settings = ();
-    type Error = /* ... */;
-    async fn load(/* ... */) -> /* ... */ { /* ... */ }
-    fn extensions(&self) -> &[&str] { &["level"] }
-}
-```
-
-### 3. 注册 HMR
-
-#### 模式 A：包装模式
-
-```rust
-use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin};
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(ConfigHmrPlugin::default())
-        .register_config::<NpcDatabase>("data/npc.ron")  // 一行注册：loader + 资源 + 系统 + 自动加载 + 持有 handle
-        .add_systems(Update, on_npc_refresh)
-        .run();
-}
-```
-
-`register_config` 自动完成：
-- 注册 `ConfigLoader<T>`（ron + json 双格式）
-- 初始化 per-type resources（`HandleEntityCache` / `RefreshDebouncer` / `LastSnapshot`）
-- 注册 `ConfigRefresh<T>` message + HMR 核心系统
-- Startup 系统自动 `asset_server.load(path)` + 持有强引用 handle（防止资产被回收）
-
-#### 模式 B：直接模式
-
-```rust
-use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin};
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(ConfigHmrPlugin::default())
-        // 用户自己注册 Asset + Loader
-        .init_asset::<LevelAsset>()
-        .register_asset_loader(LevelAssetLoader)
-        // 一行注册 HMR（不注册 ConfigLoader，不 init_asset，用户自己做）
-        .register_asset::<LevelAsset>("levels/level_1.level")
-        .add_systems(Update, on_level_refresh)
-        .run();
-}
-```
-
-`register_asset` 自动完成：
-- 初始化 per-type resources + `ConfigRefresh<A::Config>` message + HMR 核心系统
-- Startup 系统自动加载 + 持有 handle
-- **不**注册 `ConfigLoader`（用户用自己的 loader）
-- **不**调用 `init_asset`（用户自己调用）
-
-### 4. 订阅 ConfigRefresh 做精准刷新
-
-```rust
-use bevy_assets_hmr::{ConfigRefresh, RefreshCause};
-use bevy::ecs::message::MessageReader;
-
-// 包装模式：ConfigRefresh<NpcDatabase>（Config 类型 = NpcDatabase）
-fn on_npc_refresh(mut reader: MessageReader<ConfigRefresh<NpcDatabase>>) {
-    for refresh in reader.read() {
-        // refresh.new_config: NpcDatabase（直接是 Config，不需要 .raw）
-        // refresh.asset_id: UntypedAssetId（区分同类型的多个配置文件）
-        // refresh.delta: ConfigDelta（分别包含 added / removed / modified）
-        // refresh.changed_ids: HashSet<String>（added ∪ removed ∪ modified）
-        // refresh.target_entities: Vec<Entity>（ConfigBind 绑定的实体）
-        // refresh.diff_kind: DiffKind（Added/Removed/Modified/Mixed）
-        // refresh.cause: RefreshCause（Direct/Dependency/Manual/Recovery）
-        println!("变更 id: {:?}", refresh.changed_ids);
-        for id in &refresh.changed_ids {
-            if let Some(npc) = refresh.new_config.npcs.iter().find(|n| &n.id == id) {
-                println!("  [新增/修改] {} -> hp={}", id, npc.hp);
-            } else {
-                println!("  [删除] {}", id);
-            }
-        }
-    }
-}
-
-// 直接模式：ConfigRefresh<LevelAsset>（Config 类型 = LevelAsset 本身）
-fn on_level_refresh(mut reader: MessageReader<ConfigRefresh<LevelAsset>>) {
-    for refresh in reader.read() {
-        // refresh.new_config: LevelAsset（直接是 Asset 本身）
-        println!("关卡变更: {} -> max_turns={}", refresh.new_config.name, refresh.new_config.max_turns);
-    }
-}
-```
-
-### 5. 实体绑定模式（可选）
-
-如果实体直接绑定某个配置文件（如 UI 面板绑定主题），用 `ConfigBind<A>`：
-
-```rust
-use bevy_assets_hmr::ConfigBind;
-
-fn spawn_ui(mut commands: Commands, server: Res<AssetServer>) {
-    // 包装模式：load ConfigAsset<T>
-    let handle = server.load::<bevy_assets_hmr::ConfigAsset<UiTheme>>("data/ui_theme.ron");
-    commands.spawn((
-        UiPanel,
-        ConfigBind::new(handle),  // HMR 自动追踪，刷新时填充 target_entities
-    ));
-}
-```
-
-### 5.1 反射自动 Handle 追踪（可选）
-
-开发期可安装 `ReflectHandleTrackingPlugin`，自动扫描已注册反射组件中的嵌套 `Handle<A>`。此模式不要求实体携带 `ConfigBind<A>` / `AssetBind<A>`，适合 BSN 和动态生成的场景实体；显式绑定仍保留，两条路径的目标实体会合并去重。`HmrAutoWatch` 负责从资产集合注册 HMR 类型，与实体组件反射扫描是不同层次的能力。
-
-`Reflect` 已由 Bevy 内置导出，可直接使用 `bevy::prelude::Reflect`，不需要单独依赖 `bevy_reflect`。完整前提是：
-
-- 组件使用 `#[derive(Component, Reflect)]` 和 `#[reflect(Component)]`；
-- 应用调用 `register_type::<Component>()`；
-- 资产存储已初始化，并调用 `register_asset_reflect::<A>()` 为 `Handle<A>` 注册 `ReflectHandle`；
-- 仍需调用 `watch_asset::<A>()`、`register_asset::<A>()` 或 `register_config::<T>()` 安装对应的 HMR 事件路由；
-- 应用显式安装 `ReflectHandleTrackingPlugin`。扫描默认排除 Resource 实体。
-
-```rust
-#[derive(Component, Reflect, FromTemplate)]
-#[reflect(Component)]
-struct BsnRenderComponent {
-    image: Handle<Image>,
-}
-
-app.register_asset_reflect::<Image>();
-app.register_type::<BsnRenderComponent>();
-app.add_plugins(ReflectHandleTrackingPlugin::default());
-app.watch_asset::<Image>();
-
-commands.queue_spawn_scene(bsn! {
-    BsnRenderComponent { image: "textures/bg.jpg" }
-});
-```
-
-反射扫描由 `reflect_auto_tracking` feature 编译控制，默认 `dev` feature 会包含它；`--no-default-features` 会移除扫描系统。BSN 的 `queue_spawn_scene` 是延迟生成，通常在下一帧扫描后建立索引。
-
-`examples/bsn_reflect_auto.rs` 是 Bevy 原生图片热更新的对照示例。真正需要本插件的场景见 `examples/bsn_reflect_business.rs`：图片变化后，订阅方通过 `AssetChanged<Image>.target_entities` 只更新引用该图片的 BSN 实体，并重建图片尺寸派生布局和 revision。移除反射追踪后图片像素仍会由 Bevy 原生刷新，但业务派生状态不会更新。
-
-### 6. 只同步活动页面（可选）
-
-配置资产本身已经由 Bevy 替换，隐藏页面不需要立即重建 Text、Style 或子实体。页面实体同时挂载 `ConfigBind<A>` 和 `AppliedRevision<A>`；显示页面时插入 `ActiveConfigView`，隐藏时移除该 marker：
-
-```rust
-use bevy_assets_hmr::{ActiveConfigView, AppliedRevision, ConfigBind};
-
-let handle = server.load::<bevy_assets_hmr::ConfigAsset<UiTheme>>("data/ui_theme.ron");
-commands.spawn((
-    UiPanel,
-    ConfigBind::new(handle.clone()),
-    AppliedRevision::new(handle),
-    ActiveConfigView,
-));
-```
-
-活动页面在配置变化、删除或加载失败时收到轻量 `ConfigViewSync<A>`；订阅方按 `asset_id` 从当前 `Assets<A>` 读取数据后重建视图。隐藏页面只保留旧 `AppliedRevision`，期间无论更新多少次，重新插入 `ActiveConfigView` 时都只收到一次最终 revision。`AssetRevisionStatus` 可区分 Available、Removed 和 LoadFailed；失败时 Bevy 保留的上一有效资产仍可读取。
-
-这个机制只跳过派生视图重建，不会阻止全局 `ConfigRefresh<T>`，因此共享业务 Resource 仍应正常更新。直接持有 Image/Mesh Handle 的渲染组件由 Bevy 原生资产替换生效，通常无需使用这套视图重建机制。
-
-复杂度边界：AssetId 的缓存定位平均 O(1)，条目 Diff 平均 O(n)。路由需要扫描该资产的 m 个绑定实体并只为其中 u 个活动视图派发同步，因此路由加重建为 O(m + u)，不是严格 O(1)；隐藏页面只承担一次轻量状态检查，不进入昂贵的视图重建路径。
-
-## 兼容 `bevy_asset_loader`
-
-如果你已经在用 [`bevy_asset_loader`](https://crates.io/crates/bevy_asset_loader)
-的 `AssetCollection` + `LoadingState` 流程，在集合上增加
-`#[derive(HmrAutoWatch)]`，再安装宏生成的 `hmr_plugin(state)`，就能在加载
-完成后接入 HMR 框架，无需手写 `register_config` / `register_asset`。
-
-### 用法
 
 ```rust
 use bevy::prelude::*;
-use bevy_asset_loader::prelude::*;
-use bevy_assets_hmr::{
-    ConfigAsset, ConfigHmrPlugin, ConfigRefresh, HmrAutoWatch, SimpleConfigDiff,
-};
+use bevy_assets_hmr::ConfigWatchAppExt;
+use serde::Deserialize;
 
-#[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-enum GameState {
-    #[default]
-    Loading,
-    Ready,
-}
-
-#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-struct MyConfig { title: String, max_players: u32 }
-impl SimpleConfigDiff for MyConfig {}
-
-// AssetCollection + HmrAutoWatch 双 derive
-#[derive(AssetCollection, Resource, HmrAutoWatch)]
-struct GameAssets {
-    #[asset(path = "data/config.ron")]
-    cfg: Handle<ConfigAsset<MyConfig>>,  // 自动接入 HMR
+#[derive(Resource, Deserialize, Default)]
+struct Settings {
+    title: String,
 }
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(ConfigHmrPlugin::default())
-        .init_state::<GameState>()
-        .add_loading_state(
-            LoadingState::new(GameState::Loading)
-                .continue_to_state(GameState::Ready)
-                .load_collection::<GameAssets>(),
-        )
-        // 一行接入 HMR：进入 Ready 状态时接管所有 Handle<A: HmrSource> 字段
-        .add_plugins(GameAssets::hmr_plugin(GameState::Ready))
-        .add_systems(Update, my_subscriber.run_if(in_state(GameState::Ready)))
-        .run();
-}
-```
-
-`ConfigAsset<T>` 是推荐的包装模式：框架提供 loader 和 `HmrSource` 实现，
-所以不需要字段标记。已有自定义 Asset/loader 时可以使用直接模式：
-
-```rust
-#[derive(Asset, TypePath, Clone, PartialEq)]
-pub struct SkillConfig { /* ... */ }
-
-// SkillConfig 还需要实现 ConfigDiff 和 HmrSource，应用需要注册自己的 AssetLoader。
-
-#[derive(AssetCollection, Resource, HmrAutoWatch)]
-pub struct GameAssets {
-    #[asset(path = "configs/skill.ron")]
-    #[hmr_watch]
-    pub skill_config: Handle<SkillConfig>,
-
-    // 普通 Bevy 资产不标记，会被 HmrAutoWatch 跳过。
-    #[asset(path = "textures/icon.png")]
-    pub icon: Handle<Image>,
-}
-```
-
-`#[hmr_watch]` 是 `HmrAutoWatch` derive 的 helper 属性，不能脱离
-`#[derive(HmrAutoWatch)]` 单独使用。
-
-### 规则
-
-- **包装模式自动接入**：带静态 `#[asset(path = "...")]` 的
-  `Handle<ConfigAsset<T>>` 默认接入 HMR。
-- **直接模式显式接入**：`Handle<A: HmrSource>` 必须增加 `#[hmr_watch]`；
-  `A` 的 Asset 和 loader 仍由应用注册。
-- **跳过字段**：用 `#[hmr(skip)]` 跳过原本会自动接入的 `ConfigAsset<T>`。
-- **普通资产**：未标记的 `Handle<Image>` 等普通 Bevy 资产自动跳过。
-- **静态路径**：HMR 字段必须使用 `#[asset(path = "...")]`；dynamic asset
-  key 目前不支持，因为宏无法在构建插件时确定源路径。
-- **状态选择**：`hmr_plugin(state)` 的 `state` 应为 `LoadingState` 的
-  `continue_to_state` 目标状态（如 `GameState::Ready`），表示资产已加载完毕。
-- **无额外依赖**：`HmrAutoWatch` 宏和 `HmrAutoWatchPlugin` 只依赖 bevy 的
-  `States`，不依赖 `bevy_asset_loader` crate 本身--用户需自行添加
-  `bevy_asset_loader` 依赖并 `#[derive(AssetCollection)]`。
-
-## API 概览
-
-| 类型 | 说明 |
-|---|---|
-| `ConfigHmrPlugin` | 主插件，`add_plugins` 一次。可配置 `debounce_window`（默认 150ms） |
-| `ConfigHmrAppExt` | App 扩展 trait，提供 `register_config` / `register_asset` / `insert_config` / `insert_asset` / `setup_hmr_headless` |
-| `ConfigDiff` | trait：`fn diff(old, new) -> (added, removed, modified)`。支持 `#[derive(ConfigDiff)]`（含 `id_type` 参数支持 `u32`/`Uuid` 等非 String 主键） |
-| `HmrSource` | trait：从 Asset 提取 Config（包装模式自动 impl，直接模式用户 impl） |
-| `ConfigAsset<T>` | 包装 Asset：`{ raw: T, source_path: String }`（仅包装模式） |
-| `ReflectHandleTrackingPlugin` | 可选反射扫描器：维护 `UntypedAssetId` 与实体的双向索引，默认排除 Resource |
-| `ConfigRefresh<T>` | Message：携带 `asset_id`、结构化 `delta`、兼容用 `changed_ids`、`cause`、当前配置与目标实体 |
-| `ConfigRemoved<T>` | Message：资产被删除时派发，携带 `asset_id`、`target_entities` 与 `source_path` |
-| `ConfigDelta<Id>` | 分别保存 added、removed、modified ID 集合 |
-| `RefreshCause` | `Direct / Dependency { triggered_by } / Manual / Recovery` |
-| `SimpleConfigDiff` | 简化 trait：只需 `PartialEq`，自动获得 `ConfigDiff`（单对象/枚举用） |
-| `DiffKind` | `Added / Removed / Modified / Mixed` |
-| `ConfigBind<A>` | Component：实体绑定到某个 handle |
-| `ConfigHandle<A>` | Resource：持有同类型所有已注册文件的强引用 handles，防止资产被回收 |
-| `HandleEntityCache<A>` | Resource：handle ↔ entity 双向缓存，自动维护 |
-| `LastSnapshot<A>` | Resource：每个 asset id 的上一版快照，自动初始化 |
-| `AssetRevision<A>` | Resource：每个 AssetId 的单调 revision 与 Available/Removed/LoadFailed 状态 |
-| `AppliedRevision<A>` | Component：派生视图已应用的 revision |
-| `ActiveConfigView` | Component marker：存在时立即路由视图同步，移除时只累计 revision |
-| `ConfigViewSync<A>` | Message：活动视图从当前 `Assets<A>` 应用指定最终 revision 的请求 |
-| `HmrAutoWatch` | trait + derive：自动接入 `Handle<ConfigAsset<T>>`，并通过 `#[hmr_watch]` 接入直接模式的 `Handle<A: HmrSource>` |
-| `HmrAutoWatchPlugin` | 由 `HmrAutoWatch` derive 生成的 `hmr_plugin(state)` 返回的 Plugin |
-| `take_over_handle` | 手动接管已加载的 handle 接入 HMR（宏内部使用） |
-| `RefreshDebouncer<A>` | Resource：批处理窗口（默认 150ms） |
-| `AssetBind<A>` | Component：实体绑定到任意 `Asset`（无需 `ConfigDiff`） |
-| `AssetBindCache<A>` | Resource：`AssetId → {Entity}` 缓存，同 `HandleEntityCache` 但约束 `Asset` |
-| `AssetChanged<A>` | Message：任意 Asset 的 Added/Modified 业务通知（无内容 diff）。`source_path` 从 `AssetBind` 的 handle path 自动填充 |
-| `AssetRemoved<A>` | Message：任意 Asset 被删除时派发，携带 `asset_id` + `target_entities` + `source_path` |
-
-### App 扩展方法（`ConfigHmrAppExt`）
-
-| 方法 | 模式 | 说明 |
-|---|---|---|
-| `register_config::<T>(path)` | 包装 | 注册 ConfigLoader + 资源 + 系统 + 自动加载 + 持有 handle；同类型可注册多个 path |
-| `register_asset::<A>(path)` | 直接 | 只注册资源 + 系统 + 自动加载 + 持有 handle；同类型可注册多个 path（用户自己注册 loader） |
-| `insert_config::<T>(id, raw, path)` | 包装 | 直接注入数据（测试/headless 用） |
-| `insert_asset::<A>(id, asset, path)` | 直接 | 直接注入数据 + 初始化快照（测试/headless 用，消除手动样板） |
-| `watch_asset::<A>()` | 通用 | 注册实体追踪 + 变更通知，无 `ConfigDiff` 要求（用户自己 load） |
-| `setup_hmr_headless()` | 通用 | 配置 headless 环境（无渲染世界时启用 Messages 缓冲交换） |
-
-### 两种模式对比
-
-| | 包装模式 `register_config` | 直接模式 `register_asset` |
-|---|---|---|
-| 适用场景 | ron/json 配置表 | 自定义 Asset + 自定义 Loader |
-| Loader | 框架的 `ConfigLoader<T>`（ron + json） | 用户自己的 `AssetLoader` |
-| Asset 类型 | `ConfigAsset<T>`（框架包装） | `A` 本身（用户定义） |
-| Config 类型 | `T`（`ConfigAsset<T>::Config = T`） | `A`（`A::Config = A`） |
-| `ConfigRefresh<T>` 的 T | `T`（如 `NpcDatabase`） | `A`（如 `LevelAsset`） |
-| `new_config` 字段 | `T`（不需要 `.raw`） | `A`（直接是 Asset） |
-| 需 impl | `ConfigDiff`（可用 derive 宏） | `ConfigDiff` + `HmrSource` |
-
-### 两种刷新模式对比
-
-| | 数据表模式（一对多） | 实体绑定模式（一对一） |
-|---|---|---|
-| 典型场景 | `npc.ron` 含所有 NPC，消费方从 Resource 读 | 一个 UI 面板对应一个 `layout.ron` |
-| 是否用 `ConfigBind` | 否 | 是 |
-| `target_entities` | 空 | 自动填充绑定的实体 |
-| 订阅方过滤依据 | `changed_ids` ∩ 实体自身的 id 字段 | `target_entities` |
-
-## 自动化行为
-
-1. **自动加载文件**：`register_config` / `register_asset` 注册 Startup 系统自动 `asset_server.load(path)` + 持有强引用 handle
-2. **自动追踪实体绑定**：`ConfigBind<A>` 被 `config_binding_registry_system` 自动扫描注册到 `HandleEntityCache<A>`
-3. **自动初始化快照**：首次加载时自动记录初始版本，不派发"首次加载"事件
-4. **自动 diff + 派发**：资产变更后自动 diff + debounce + 派发 `ConfigRefresh<T>`
-5. **自动跳过空 diff**：diff 为空时不派发，订阅方不会收到无意义的刷新
-6. **自动 debounce**：短时间内的多次写入合并为一次刷新（窗口可配置）
-7. **自动缓存校验**：每 30 秒自动校验 `HandleEntityCache` 与实际组件的一致性
-8. **自动依赖图 + 级联**：构建跨类型 `Handle<*>` 依赖图，子资产变更自动派发 `ConfigRefresh` 给父资产订阅方，并在 `RefreshCause::Dependency` 中保留触发源
-
-## 配置校验
-
-包装模式可在注册配置后安装类型级 Validator。Validator 在反序列化之后、资产
-替换之前由 `ConfigLoader` 执行；失败会进入 Bevy 的 loader failure 路径，因此
-热重载时仍保留最后一个合法资产。
-
-```rust,ignore
-app.register_config::<NpcDatabase>("data/npc.ron")
-    .register_config_validator::<NpcDatabase, _>(|config| {
-        if config.npcs.iter().any(|npc| npc.id.is_empty()) {
-            Err("npc id must not be empty".into())
-        } else {
-            Ok(())
-        }
-    });
-```
-
-Validator 对同类型的所有注册路径生效。直接模式使用用户自己的 loader，应在该
-loader 内完成等价校验。
-
-## 性能指标与基准
-
-每个注册类型都会初始化 `HmrMetrics<A>`，记录 Diff 次数和耗时、刷新/恢复/
-失败/删除/级联次数，以及完整配置 Clone 次数。对于包含 `Vec`、`String` 等堆
-分配的配置，可注册 owned-size estimator，避免把浅层 `size_of` 误当成真实字节量：
-
-```rust,ignore
-app.register_config::<NpcDatabase>("data/npc.ron")
-    .register_config_size_estimator::<NpcDatabase>(|config| {
-        std::mem::size_of::<NpcDatabase>()
-            + config.npcs.capacity() * std::mem::size_of::<Npc>()
-    });
-
-fn report(metrics: Res<HmrMetrics<ConfigAsset<NpcDatabase>>>) {
-    println!("diffs={}, clones={}, bytes={}",
-        metrics.diff_runs,
-        metrics.config_clone_count,
-        metrics.estimated_clone_bytes,
-    );
-}
-```
-
-运行 `cargo run --example diff_baseline` 可取得 debug 基线；资源允许时使用
-`cargo bench --bench diff_baseline` 取得 release 基线。基准覆盖 1k、10k、
-100k 条目以及连续 10k 条目保存负载。
-
-当前事件载荷评估结论是暂时保留 `ConfigRefresh::new_config`：现有直接模式、
-级联订阅方和示例大量依赖该字段，立即移除会扩大首发版本的迁移范围。大型配置可
-通过 `HmrMetrics` 判断 Clone 是否成为瓶颈；确认后再将事件收敛为
-`AssetId + delta + revision + cause`，由消费者从 `Assets` 读取当前值。
-
-## 依赖链级联（`DependencyGraph`）
-
-当一个父配置通过 `Handle<*>` 字段持有子配置的引用时，修改子配置会自动让父配置订阅方收到一个 `ConfigRefresh<T>`——这让"父配置缓存子配置派生数据"成为可能。
-
-子资产被删除、加载失败或从失败中恢复时也会触发同一条业务级联。加载失败时
-Bevy 仍保留最后有效资产；父订阅方通过级联事件决定继续使用旧派生状态、显示
-降级状态或暂停相关功能。
-
-### 工作机制
-
-1. **`#[derive(Asset)]`** 自动生成 `VisitAssetDependencies` impl，遍历所有标有 `#[dependency]` 的 `Handle<*>` 字段。
-2. **`dependency_registry_system<A>`**（注册在 `flush_debounced_refresh` 之后）每次 `AssetEvent<A>::Added/Modified` 时重建该资产在 `DependencyGraph` 中的边。
-3. **`flush_debounced_refresh<A>`**（修改后）在派发 `ConfigRefresh` 后，查询图找出此资产的所有父资产，推入 `CascadeQueue.pending`。
-4. **`cascade_dispatch_system<A>`**（每类型，链末尾）排空 `CascadeQueue` 中匹配当前类型的条目，为每个父资产派发一次 `ConfigRefresh<A::Config>`，并合并本帧所有 `triggered_by` 子资产；级联会继续向祖父资产传播，但同一根触发源的深度最多 32 层，循环依赖会被 visited 集合截断。
-
-Bevy 的 loader dependency 和本插件的业务依赖是两个层次：loader dependency 负责
-`AssetServer` 在文件重载时重新加载底层资产；只有配置资产中显式标记
-`#[dependency]` 的 Handle 才会进入本插件的 `DependencyGraph`，并触发业务层
-`ConfigRefresh` 级联。插件不会从 Bevy loader 的内部依赖信息推断业务刷新关系。
-
-### 订阅方语义
-
-```rust
-fn on_parent_refreshed(mut reader: MessageReader<ConfigRefresh<ParentDb>>) {
-    for refresh in reader.read() {
-        match &refresh.cause {
-            RefreshCause::Dependency { triggered_by } => {
-                rederive_state_from_children(&refresh.new_config, triggered_by);
-            }
-            RefreshCause::Direct => {
-                apply_diff(&refresh.delta, &refresh.new_config);
-            }
-            _ => {}
-        }
-    }
-}
-```
-
-### 使用示例
-
-```rust
-use bevy::prelude::*;
-use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, ConfigDiff, HmrSource};
-use bevy::asset::Asset;
-use bevy::reflect::TypePath;
-use serde::{Deserialize, Serialize};
-
-#[derive(Asset, TypePath, Serialize, Deserialize, Clone, PartialEq, Default, ConfigDiff)]
-#[config_diff(field = "entries", id = "id")]
-struct ItemDb {
-    entries: Vec<Item>,
-}
-
-#[derive(Asset, TypePath, Serialize, Deserialize, Clone, PartialEq, Default, ConfigDiff)]
-#[config_diff(field = "entries", id = "id")]
-struct NpcDatabase {
-    entries: Vec<NpcEntry>,
-    /// 这个 Handle 字段让 NpcDatabase 自动依赖 ItemDb。
-    /// 用 `#[dependency]` 标记后，修改 item.ron 会让 NpcDatabase
-    /// 订阅方收到 `changed_ids` 为空的 ConfigRefresh。
-    #[dependency]
-    item_table: Handle<ItemDb>,
-}
-
-app.add_plugins(ConfigHmrPlugin::default())
-    .register_config::<ItemDb>("data/items.ron")
-    .register_config::<NpcDatabase>("data/npcs.ron");
-```
-
-### API 概览
-
-| 符号 | 说明 |
-|---|---|
-| `DependencyGraph` | Resource：`UntypedAssetId -> Vec<(parent_untyped, parent TypeId)>` |
-| `CascadeQueue` | Resource：包含 parent、类型与 `triggered_by` 的待级联请求；带重复请求去重和 32 层深度上限 |
-| `dependency_registry_system<A>` | 系统：从 `AssetEvent<A>::Added/Modified` 重建依赖边 |
-| `dependency_cleanup_system<A>` | 系统：从 `AssetEvent<A>::Removed` 清理边 |
-| `cascade_dispatch_system<A>` | 系统：派发级联 `ConfigRefresh<A::Config>`（下帧执行） |
-
-## 普通 Asset 业务影响通知（`watch_asset`）
-
-除配置表的 diff-based HMR 外，本框架还支持为**任意 Bevy Asset 类型**附加轻量业务通知，
-例如图片、3D 模型、音频和字体。不要求 `ConfigDiff`，只做 Asset 事件转发和实体影响追踪；
-实际文件监听、加载和渲染资源替换仍由 Bevy 完成。
-
-Bevy 的 `AssetServer`（启用 `bevy/file_watcher` 时）已自动处理文件的磁盘监听、重载和 GPU 上传。`watch_asset` 在此基础上附加：
-
-1. **实体绑定追踪**：`AssetBind<A>` 组件 + `AssetBindCache<A>` 缓存
-2. **变更通知事件**：在 Asset `Added` / `Modified` 时发送 `AssetChanged<A>` Message（携带 `asset_id`、`target_entities`、`source_path`）
-3. **删除通知事件**：`AssetRemoved<A>` Message（资产被删除时派发，携带 `asset_id`、`target_entities`、`source_path`）
-
-> `source_path` 从 `AssetBind<A>` 注册时记录的 `Handle::path()` 自动填充。若 handle 无路径（如直接 `Assets::insert`），则为空字符串。
->
-> `AssetChanged<A>` 不复制资产值。图片等大型资产包含解码后的字节缓冲，复制进
-> Message 会造成明显的帧停顿和内存峰值。需要读取新值时调用
-> `event.asset(&assets)`，或用 `event.asset_id` 查询 `Assets<A>`。
-
-### 使用示例
-
-```rust
-use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, AssetChanged, AssetBind};
-
-fn main() {
-    App::new()
-        // 还需在 Cargo.toml 中显式启用 bevy/file_watcher
-        .add_plugins(DefaultPlugins)
-        .add_plugins(ConfigHmrPlugin::default())
-        // 一行声明要追踪的类型（不加载文件，只注册基础设施）
-        .watch_asset::<Image>()
-        .watch_asset::<Mesh>()
-        .add_systems(Update, on_image_changed)
-        .add_systems(Startup, setup)
+        .add_plugins(MinimalPlugins)
+        // 格式由扩展名决定（.ron / .json）；默认相对 `assets/` 解析
+        .watch_config::<Settings>("data/settings.ron")
+        .add_systems(Update, use_settings)
         .run();
 }
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let handle = asset_server.load::<Image>("textures/player.png");
-    commands.spawn((
-        Sprite::from_image(handle.clone()),
-        AssetBind::new(handle),  // HMR 自动追踪，变更时填充 target_entities
-    ));
-}
-
-fn on_image_changed(
-    mut reader: MessageReader<AssetChanged<Image>>,
-    images: Res<Assets<Image>>,
-) {
-    for evt in reader.read() {
-        if let Some(image) = evt.asset(&images) {
-            info!(
-                "图片已更新，{} 个实体受影响，尺寸 {:?}",
-                evt.target_entities.len(),
-                image.texture_descriptor.size,
-            );
-        }
+// 像读任何其他 Resource 一样读它
+fn use_settings(settings: Res<Settings>) {
+    if !settings.is_changed() {
+        return;
     }
+    println!("title = {}", settings.title);
 }
 ```
 
-### 在 `bsn!` 宏中使用 `AssetBind`
-
-Bevy 0.20 的 `bsn!` 宏支持把 `AssetBind<A>` 当作组件写在场景条目里。`AssetBind<A>` 内含 `Handle<A>`，而 Bevy 用 `SpecializeFromTemplate` auto-trait 把 `Handle<A>` 刻意排除在 `Unpin` 之外，导致它无法走 `FromTemplate` 的 blanket impl。为此本 crate 提供了手写的 `AssetBindTemplate<A>` 作为 `<AssetBind<A> as FromTemplate>::Template`，你无需关心其存在，直接写 `AssetBind<A>` 即可。
-
-> Bevy 0.20 起 BSN 用 `--` 分隔同层条目，且不再需要把条目包在括号里；逗号与括号写法已废弃。
+## 多格式
 
 ```rust
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    // 写法 A:{expr} 内联表达式
-    commands.spawn_scene(bsn! {
-        Node { width: percent(100), height: percent(100) }
-        Children [
-            ImageNode { image: {asset_server.load("textures/bg.jpg")} }
-            AssetBind<Image> { handle: {asset_server.load("textures/bg.jpg")} }
-        ]
-    });
-
-    // 写法 B:外部变量(注意:裸 ident 在 bsn! 中会被当成函数名,必须用 { } 包裹)
-    let handle = asset_server.load::<Image>("textures/bg.jpg");
-    commands.spawn_scene(bsn! {
-        Node { width: percent(100), height: percent(100) }
-        Children [
-            ImageNode { image: {handle.clone()} }
-            AssetBind<Image> { handle: {handle.clone()} }
-        ]
-    });
-}
+app.watch_config::<Settings>("data/settings.ron")   // ron::from_str
+   .watch_config::<Server>("data/server.json")      // serde_json::from_str
+   .watch_config_with::<Theme, _>("data/theme.toml", |text| {
+       toml::from_str(text).map_err(|error| error.to_string())
+   });
 ```
 
-> **注意**:`ImageNode` 的图片热更由 Bevy 原生 `RenderAssets::<GpuImage>` 负责(改了文件自动重传 GPU),**不需要** `AssetBind`。`AssetBind` 只在你需要"知道哪些实体绑定了这张图、收到 `AssetChanged<Image>` 后做额外自定义响应"时才加(如重建图集、重建碰撞体、记日志等)。
+| 扩展名 | 解析器 |
+|---|---|
+| `.ron` | `ron::from_str` |
+| `.json` | `serde_json::from_str` |
+| 其它 | 必须用 `watch_config_with` 提供解析函数；直接 `watch_config` 会 panic 并提示 |
 
-### 对比 `register_config` / `register_asset`
+## 对配置类型的要求
 
-| | `register_config` / `register_asset` | `watch_asset` |
-|---|---|---|
-| 适用类型 | 配置表（ron/json） | 任意 Asset（Image/Mesh/AudioSource/字体/模型资产） |
-| 要求 | `HmrSource` + `ConfigDiff`（包装模式自动提供 `HmrSource`） | 仅 `Asset` |
-| Diff | ✅ 条目级 diff（added/removed/modified） | ❌ 无 diff，整体变更通知 |
-| 业务派发合并 | ✅ 默认按 AssetId 合并 150ms 窗口 | ❌ 直接转发 `Added` / `Modified` |
-| 重载 | ConfigLoader / 用户自定义 Loader | Bevy 内置 Loader / 用户自定义 Loader |
-| 通知事件 | `ConfigRefresh<T>` / `ConfigRemoved<T>` | `AssetChanged<A>` |
-| 实体绑定 | `ConfigBind<A>` | `AssetBind<A>` |
+`T` 需要 `Resource + Deserialize + Default`：
+
+- `Deserialize`：解析文件；
+- `Resource`：让值能存在于世界中；
+- `Default`：在首次加载成功之前 `Res<T>` 也能解析（此时读到 `T::default()`，
+  文件缺失会写一条 warning 日志）。这样消费方不需要 `Option<Res<T>>`，
+  也不会因为资源不存在而 panic。
+
+## 行为
+
+- **自动加载**：注册的类型在 app 第一次 update 时即加载文件，无需单独的 Startup 步骤。
+- **变更检测**：文件每次轮询都会重新读取并与上一版文本比较（不依赖文件系统 mtime 精度）。只有加载成功才重新插入资源，因此 `Res::is_changed()` 只在真正热更新时触发，不会空转。
+- **防抖**：默认每 150ms 轮询一次，天然合并编辑器的原子写入（删除 + 重命名）。
+- **出错不丢数据**：解析失败或文件暂时缺失时，上一份合法值仍保留在世界里，错误写入日志（`bevy::log`）；文件修好后自动恢复。
+- **一个类型一个文件**：同一个 `T` 重复注册会打 warning 并忽略第二个路径。
+
+## API
+
+| 项 | 说明 |
+|---|---|
+| `App::watch_config::<T>(path)` | 按扩展名（`.ron`/`.json`）注册要监听的文件。`T` 需实现 `Resource + Deserialize + Default`。 |
+| `App::watch_config_with::<T, F>(path, parser)` | 自定义格式，`parser: Fn(&str) -> Result<T, String>`。 |
+| `ConfigWatchPlugin` | 可选插件，用于自定义 `root`（默认 `assets`）与 `poll_interval`（默认 150ms）。须在注册之前添加。 |
+| `DEFAULT_ROOT` / `DEFAULT_POLL_INTERVAL` | 上述默认值常量。 |
+
+## 说明
+
+- 路径相对于 `ConfigWatchPlugin::root`（默认 `assets/`）；绝对路径按原样使用。
+- 本插件不使用 Bevy 的 `AssetServer`，因此不需要 `bevy/file_watcher` feature，也不经过资产系统。
+- 解析错误与文件缺失只写日志：因为资源就是你的类型本身，没有地方存放结构化的错误信息。需要程序化处理错误时，可自行在业务系统里校验读到的值。
 
 ## 示例
 
 ```bash
-# 基础：定义 Asset -> derive ConfigDiff -> register_config -> 模拟变更 -> 订阅事件
-cargo run --example basic -p bevy_assets_hmr
-
-# 实体定向刷新：ConfigBind + HandleEntityCache 精准命中绑定的面板
-cargo run --example config_bind -p bevy_assets_hmr
-
-# 多类型并存：NpcDatabase + ItemDatabase 各自独立订阅
-cargo run --example multi_type -p bevy_assets_hmr
-
-# 直接模式：自定义 Asset + 自定义 Loader + register_asset
-cargo run --example direct_mode -p bevy_assets_hmr
-
-# bsn! 内联 AssetBind：验证 AssetBind<Image> 能直接在 bsn! 宏中作为组件使用
-cargo run --example bsn_asset_bind -p bevy_assets_hmr
-
-# bsn! 无 AssetBind：通过 Reflect 自动发现组件内 Handle<Image>
-cargo run --example bsn_reflect_auto -p bevy_assets_hmr
-
-# bsn! 业务重建：图片变化后精准更新引用实体的派生布局
-cargo run --example bsn_reflect_business -p bevy_assets_hmr
-
-# 窗口版查看器：打开 bevy 窗口，UI 显示配置内容 + 提示（需要 bevy_render + bevy_winit features）
-cargo run --example basic_viewer -p bevy_assets_hmr
-
-# 控制台查看器：格式化打印配置内容 + 修改提示
-cargo run --example viewer -p bevy_assets_hmr
-
-# bevy_asset_loader 窗口版查看器：LoadingState 加载 + HMR 实时刷新
-cargo run --example asset_loader_viewer -p bevy_assets_hmr
+cargo run --example simplest     # 自包含：加载 / 重载 / 损坏 / 恢复
+cargo run --example live_watch   # 手动编辑 assets/data/npc.ron 看热更新
+cargo run --example formats      # ron + json + 自定义格式共存
 ```
-
-### `basic.rs` - 包装模式最简流程
-
-```rust
-#[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default, ConfigDiff)]
-#[config_diff(field = "npcs", id = "id")]
-struct NpcDatabase { npcs: Vec<NpcEntry> }
-
-app.add_plugins(ConfigHmrPlugin::default());
-app.register_config::<NpcDatabase>("data/npc.ron");
-// 订阅 MessageReader<ConfigRefresh<NpcDatabase>>
-```
-
-### `config_bind.rs` - 实体绑定模式
-
-```rust
-// 实体挂 ConfigBind::<ConfigAsset<UiTheme>>
-commands.spawn((
-    UiPanel { label: "panel_1".into() },
-    ConfigBind::with_id(theme_id),
-));
-// 订阅方用 refresh.target_entities 精准刷新
-```
-
-### `multi_type.rs` - 多类型链式注册
-
-```rust
-app.register_config::<NpcDatabase>("data/npc.ron")
-   .register_config::<ItemDatabase>("data/item.ron");
-```
-
-### `direct_mode.rs` - 直接模式（自定义 Asset + Loader）
-
-```rust
-impl HmrSource for LevelAsset {
-    type Config = LevelAsset;
-    fn config(&self) -> &Self { self }
-}
-
-app.init_asset::<LevelAsset>();
-app.register_asset_loader(LevelAssetLoader);
-app.register_asset::<LevelAsset>("levels/level_1.level");
-// 订阅 MessageReader<ConfigRefresh<LevelAsset>>
-```
-
-### `bsn_asset_bind.rs` - `bsn!` 内联 `AssetBind`
-
-验证 `AssetBind<Image>` 能否作为组件直接写在 `bsn!` 宏的场景条目中,以及 `{asset_server.load(...)}` 内联表达式作为字段值是否合法。同时演示外部 `Handle` 变量作为字段值的写法。
-
-```rust
-commands.spawn_scene(bsn! {
-    Node { width: percent(100), height: percent(100) }
-    Children [
-        (
-            ImageNode { image: {asset_server.load(BG_PATH)} }
-            AssetBind<Image> { handle: {asset_server.load(BG_PATH)} }
-        ),
-    ]
-});
-```
-
-> **前提**:App 构建时需调用 `app.watch_asset::<Image>()` 注册 `AssetBindCache<Image>` 与追踪系统。运行前需要 `assets/textures/bg.jpg`(已随仓库附带)。
-
-### `basic_viewer.rs` - 窗口版查看器（`DefaultPlugins`）
-
-打开一个真实 bevy 窗口，在 UI 中显示示例 NPC 配置内容，并提示"修改文件后可重新运行查看更新"。演示了 `MinimalPlugins + WindowPlugin + WinitPlugin` 组合下的窗口 + UI 文本渲染。不含 HMR 消息系统（窗口环境下消息初始化有 GPU 驱动依赖差异）。
-
-```rust
-app.add_plugins(DefaultPlugins);  // 开窗口
-app.add_systems(Startup, setup_ui);  // UI 渲染
-```
-
-> **前提**：需要 `bevy_render` + `bevy_winit` dev-dependencies。
-
-### `viewer.rs` - 控制台查看器
-
-启动后格式化打印当前配置内容，并提示修改 RON 文件后可重新运行查看更新。基于 `basic.rs` 的 headless HMR 流程，是日常开发最常用的查看方式。
-
-```rust
-app.register_config::<NpcDatabase>("data/npc.ron");  // 自动加载
-// 启动系统直接读取 Assets 打印
-// 修改文件后重新运行即可看到更新
-```
-
-运行输出示例：
-```
-╔══════════════════════════════════════╗
-║  📦 bevy_assets_hmr 配置查看器     ║
-║  共 3 条 NPC 数据：                ║
-║    npc_1 — 商人 (HP: 100)          ║
-║    npc_2 — 守卫 (HP: 150)          ║
-║    npc_3 — 法师 (HP: 80)            ║
-║  💡 修改 assets/data/npc.ron 后     ║
-║  重新运行即可看到更新内容。          ║
-╚══════════════════════════════════════╝
-```
-
-### `asset_loader_viewer.rs` - `bevy_asset_loader` 窗口版（GUI 完整流程）
-
-用 `LoadingState` 加载 `ConfigAsset<MyConfig>`，进入 `GameState::Ready` 后由 `GameAssets::hmr_plugin(GameState::Ready)` 把 handle 自动接入 HMR，UI 显示配置内容，修改 `assets/data/config.ron` 后窗口自动更新。是"兼容 bevy_asset_loader"章节的可运行实例。
-
-```rust
-app.init_state::<GameState>()
-    .add_loading_state(
-        LoadingState::new(GameState::Loading)
-            .continue_to_state(GameState::Ready)
-            .load_collection::<GameAssets>(),
-    )
-    .add_plugins(GameAssets::hmr_plugin(GameState::Ready));
-```
-
-> **前提**：需要 `bevy/file_watcher` feature（dev-deps 已启用）。
-
-## Bevy 0.20 兼容性
-
-### `bevy/file_watcher` 文件监听
-
-本 crate 不启用 `bevy/file_watcher`，由消费方按需启用：
-
-```toml
-[features]
-hmr = ["bevy/file_watcher"]
-```
-
-启用后，修改 `assets/` 下的文件会自动 reload → 派发 `AssetEvent::Modified` → HMR 核心 diff → `ConfigRefresh<T>`。渲染资产（mesh/texture）走 bevy 原生自动更新，配置数据走 HMR 框架 diff + 定向刷新，两者共享同一个 file_watcher，不冲突。
-
-### Headless 环境配置
-
-标准的 `DefaultPlugins` 或 `MinimalPlugins` 应用不需要调用
-`setup_hmr_headless()`；该 helper 只用于手动驱动 schedule/message 的特殊测试环境。
-
-### `Assets::insert` 的事件派发时机
-
-`Assets::insert` 把事件写入 `queued_events`，由 `Assets::asset_events` 系统（在 `PostUpdate`）flush 到 `Messages<AssetEvent>`。同一帧内 `insert` 后立刻读 `MessageReader` 读不到（要等下一帧）。测试用 `insert_config` 直接初始化快照绕过这个延迟。
-
-## 常见问题（FAQ）
-
-### Q: ron/json 语法写错了会怎样？会丢失数据吗？
-
-不会。Bevy 在热重载失败时会保留上一有效资产；插件监听真实的加载失败事件并派发 `ConfigReloadFailed<T>`，其中包含资产 ID、源路径、原始错误以及可用时的上一有效配置。插件不会向 `Assets` 人工回写快照，因此不会额外制造一次 `Modified` 事件。
-
-### Q: 修改 GLTF 贴图后，材质为什么不联动刷新？
-
-Bevy 会根据 `AssetLoader` 通过 `LoadContext` 登记的 loader dependency 传播重载，但它不会
-自动理解 ECS 中任意 Handle 所代表的业务影响关系。`watch_asset` 和 Reflect 追踪用于补充后者：
-如果贴图变化后还需要重建碰撞体、图集索引或自定义材质缓存，请在
-`AssetChanged<Image>` 订阅方中处理。普通渲染 Handle 的资源替换通常仍由 Bevy 自动完成。
-
-### Q: 频繁保存文件（多次 Ctrl+S）会触发多次重载吗？
-
-可能会，取决于保存间隔。Bevy 的 file watcher 会先处理底层文件事件；配置路径上的业务派发
-还会用默认 150ms 窗口（可通过 `ConfigHmrPlugin { debounce_window: ... }` 配置）合并同一
-AssetId 的短时事件。超出窗口的多次有效保存会分别产生刷新，这是预期行为。
-
-### Q: Release 构建时 HMR 还有运行时开销吗？
-
-`dev` feature（默认启用）控制本 crate 的 HMR 运行时系统。发布时用
-`--no-default-features` 编译，可移除本 crate 的扫描、diff 和派发系统；类型注册、Resource、
-Message 以及正常资产加载仍可能存在，因此不应笼统称为整个集成“零开销”：
-```toml
-[dependencies]
-bevy_assets_hmr = { git = "https://github.com/remloyal/bevy_assets_hmr", default-features = false }
-```
-
-### Q: Web（WASM）平台能用吗？
-
-WASM 环境不能使用本地磁盘 `bevy/file_watcher`，因此没有与桌面开发相同的自动文件监听体验。
-但 diff、路由和消息机制本身不依赖本地文件系统；通过 `Assets::insert` 或自定义网络/编辑器
-数据源更新 Asset 时，仍可复用这些语义层能力。
 
 ## License
 

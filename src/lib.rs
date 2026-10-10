@@ -1,141 +1,190 @@
-//! Semantic config change and asset-impact propagation for Bevy 0.20.
+//! Minimal config-file hot-reload for Bevy 0.20.
 //!
-//! Bevy's `AssetServer` remains responsible for watching, loading, and replacing
-//! assets. This crate adds targeted, diff-based refresh semantics for RON/JSON
-//! configs and entity-impact routing for changed assets. Define an
-//! `XxxDatabase` Asset type, implement [`ConfigDiff`], then call
-//! [`App::register_config`](crate::ConfigHmrAppExt::register_config) to wire it
-//! up. Subscribers consume [`ConfigRefresh<T>`] messages.
+//! Point at a config file once. Its parsed contents live in the world as a
+//! [`Resource`] of **your own type**, and are replaced in place whenever the
+//! file changes on disk. There is no wrapper type, no event, and no hook.
+//!
+//! Supported out of the box: `.ron` and `.json` (chosen by file extension).
+//! Any other format works through a custom parser.
 //!
 //! # Quick start
+//!
 //! ```no_run
 //! use bevy::prelude::*;
-//! use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin, SimpleConfigDiff};
-//! # use bevy::asset::Asset;
-//! # use bevy::reflect::TypePath;
-//! # use serde::{Deserialize, Serialize};
-//! # #[derive(Asset, TypePath, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-//! # struct MyDb;
-//! # impl SimpleConfigDiff for MyDb {}
+//! use bevy_assets_hmr::ConfigWatchAppExt;
+//! use serde::Deserialize;
 //!
-//! let mut app = App::new();
-//! app.add_plugins(MinimalPlugins);
-//! app.add_plugins(bevy::asset::AssetPlugin::default());
-//! app.add_plugins(ConfigHmrPlugin::default());
-//! app.register_config::<MyDb>("data/my.ron");
+//! #[derive(Resource, Deserialize, Default)]
+//! struct Settings {
+//!     title: String,
+//! }
+//!
+//! fn main() {
+//!     App::new()
+//!         .add_plugins(MinimalPlugins)
+//!         // format is picked from the extension; resolved against `assets/`
+//!         .watch_config::<Settings>("data/settings.ron")
+//!         .add_systems(Update, use_settings)
+//!         .run();
+//! }
+//!
+//! // Read it like any other resource.
+//! fn use_settings(settings: Res<Settings>) {
+//!     if !settings.is_changed() {
+//!         return;
+//!     }
+//!     println!("title = {}", settings.title);
+//! }
 //! ```
+//!
+//! # Formats
+//!
+//! - `.ron` → `ron::from_str`
+//! - `.json` → `serde_json::from_str`
+//! - anything else → register with [`watch_config_with`] and supply a parser:
+//!
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use bevy_assets_hmr::ConfigWatchAppExt;
+//! #[derive(Resource, Default)]
+//! struct Volume {
+//!     level: u32,
+//! }
+//!
+//! App::new()
+//!     .add_plugins(MinimalPlugins)
+//!     // no `toml` dependency here — the parser is entirely yours
+//!     .watch_config_with::<Volume, _>("data/volume.txt", |text| {
+//!         text.trim()
+//!             .parse::<u32>()
+//!             .map(|level| Volume { level })
+//!             .map_err(|error| error.to_string())
+//!     });
+//! ```
+//!
+//! # Behavior
+//!
+//! - **Setup**: one line per type. The file is loaded on the first frame the
+//!   app updates; no separate startup step is required.
+//! - **Consumption**: a plain `Res<T>` of your own type. Bevy's
+//!   [`Res::is_changed`] tells you when the value was reloaded.
+//! - **Debounce**: files are polled on an interval (default 150ms), which
+//!   coalesces editor atomic saves.
+//! - **Errors do not lose data**: a parse error or a temporarily missing file
+//!   keeps the last valid value and logs a warning/error. Fixing the file
+//!   recovers automatically.
+//! - **Change detection is content-based**: the file is re-read each poll and
+//!   compared to the previous text, so edits are detected regardless of
+//!   filesystem mtime granularity. `T` is only re-inserted when a load
+//!   succeeds, so `Res<T>::is_changed` never fires spuriously.
+//!
+//! # Requirements on `T`
+//!
+//! For [`watch_config`](ConfigWatchAppExt::watch_config), `T` must be
+//! `Resource + Deserialize + Default`:
+//! - `Deserialize` to parse the file.
+//! - `Resource` so the value can live in the world.
+//! - `Default` so that `Res<T>` resolves even before the first successful
+//!   load (you then read `T::default()`; the watcher logs a warning when the
+//!   file is missing). This avoids `Option<Res<T>>` in consumers and any
+//!   runtime panic from a missing resource.
+//!
+//! [`watch_config_with`](ConfigWatchAppExt::watch_config_with) keeps only the
+//! `Resource + Default` requirements — a custom parser needs no `Deserialize`.
+//!
+//! # One file per type
+//!
+//! A `T` is loaded from a single file. Registering the same `T` twice logs a
+//! warning and ignores the second path.
 
 #![forbid(unsafe_code)]
 
-mod asset;
-mod binding;
-mod core;
-mod debounce;
-mod dependency;
-mod diff;
-pub mod ext;
-mod loader;
-mod metrics;
-mod reflect_tracker;
-mod refresh;
-mod registry;
-mod view;
-mod watcher;
+mod watch;
 
-pub use asset::{ConfigAsset, ConfigHandle};
-pub use binding::{
-    ConfigBind, HandleEntityCache, config_binding_cleanup_system, config_binding_registry_system,
-};
-pub use core::{
-    HmrAsset, HmrSource, LastSnapshot, asset_load_failed_system, cache_validation_system,
-    hmr_core_system,
-};
-pub use debounce::{RefreshDebouncer, flush_debounced_refresh};
-pub use dependency::{
-    CascadeQueue, CascadeRequest, DependencyGraph, MAX_CASCADE_DEPTH, cascade_dispatch_system,
-    dependency_cleanup_system, dependency_registry_system,
-};
-pub use diff::{ConfigDiff, ConfigDiffResult, SimpleConfigDiff, diff_entries_by_id};
-pub use ext::ConfigHmrAppExt;
-pub use ext::{HmrAutoWatch, HmrAutoWatchPlugin, adopt_handle, take_over_handle};
-pub use loader::{ConfigLoader, ConfigValidator};
-pub use metrics::HmrMetrics;
-pub use reflect_tracker::{
-    ReflectHandleCache, ReflectHandleExtraction, ReflectHandleTrackingMetrics,
-    ReflectHandleTrackingPlugin, ReflectHandleTrackingSet, extract_reflected_handles,
-};
-pub use refresh::{
-    ConfigDelta, ConfigRefresh, ConfigReloadFailed, ConfigRemoved, DiffKind, RefreshCause,
-};
-pub use registry::ConfigPathRegistry;
-pub use view::{
-    ActiveConfigView, AppliedRevision, AssetRevision, AssetRevisionEntry, AssetRevisionStatus,
-    ConfigViewSync, route_active_config_views, sync_activated_config_views,
-};
-pub use watcher::{
-    AssetBind, AssetBindCache, AssetBindTemplate, AssetChanged, AssetRemoved,
-    asset_bind_cleanup_system, asset_bind_registry_system, asset_watcher_system,
-};
-
-// Re-export derive macro，让用户 `use bevy_assets_hmr::ConfigDiff` 同时
-// 获得 trait 和 `#[derive(ConfigDiff)]` 能力（Rust 允许 derive macro 和
-// trait 同名，类似 bevy 的 `Component`）。
-pub use bevy_assets_hmr_derive::ConfigDiff;
-
-// Re-export HmrAutoWatch derive macro（同名 trait + derive，类似 ConfigDiff）。
-pub use bevy_assets_hmr_derive::HmrAutoWatch;
+pub use watch::{ConfigWatchPlugin, DEFAULT_POLL_INTERVAL, DEFAULT_ROOT};
 
 use bevy::prelude::*;
-use std::time::Duration;
+use serde::de::DeserializeOwned;
 
-/// Default debounce window (milliseconds) used to merge rapid business
-/// dispatches per asset, shared by [`ConfigHmrPlugin`], the per-type
-/// [`crate::RefreshDebouncer`] and the registration helpers' fallback.
-pub(crate) const DEFAULT_DEBOUNCE_MILLIS: u64 = 150;
-
-/// HMR plugin. Add to your `App` once, then call
-/// [`App::register_config`](ConfigHmrAppExt::register_config) for each
-/// config type you want to hot-reload.
+/// App extension trait enabling config-file watching.
 ///
-/// # Example
-/// ```no_run
-/// use bevy::prelude::*;
-/// use bevy_assets_hmr::{ConfigHmrAppExt, ConfigHmrPlugin};
-///
-/// let mut app = App::new();
-/// app.add_plugins(MinimalPlugins);
-/// app.add_plugins(bevy::asset::AssetPlugin::default());
-/// app.add_plugins(ConfigHmrPlugin::default());
-/// // app.register_config::<MyDb>("data/my.ron");
-/// ```
-pub struct ConfigHmrPlugin {
-    /// Window for merging rapid business dispatches per asset. Default 150ms.
-    pub debounce_window: Duration,
+/// Import it as `use bevy_assets_hmr::ConfigWatchAppExt;`.
+pub trait ConfigWatchAppExt {
+    /// Watch a config file, choosing the parser from the file extension
+    /// (`.ron` or `.json`), and keep its parsed value up to date in the world
+    /// as a resource of type `T`.
+    ///
+    /// `T` must be `Resource + Deserialize + Default` (see the crate docs).
+    /// `path` is resolved against [`ConfigWatchPlugin::root`] (default
+    /// `assets/`); an absolute path is used as-is.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the extension is neither `.ron` nor `.json`. Use
+    /// [`watch_config_with`](Self::watch_config_with) for other formats.
+    fn watch_config<T: Resource + DeserializeOwned + Default + Send + Sync + 'static>(
+        &mut self,
+        path: &str,
+    ) -> &mut Self;
+
+    /// Watch a config file using a caller-supplied parser.
+    ///
+    /// The parser receives the file's full text and returns either the parsed
+    /// value or an error message (logged, with the last good value kept).
+    ///
+    /// Unlike [`watch_config`](Self::watch_config), `T` does **not** need to
+    /// implement `Deserialize` — the parser is entirely yours.
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use bevy_assets_hmr::ConfigWatchAppExt;
+    /// #[derive(Resource, Default)]
+    /// struct Volume {
+    ///     level: u32,
+    /// }
+    ///
+    /// # let mut app = App::new();
+    /// app.watch_config_with::<Volume, _>("data/volume.txt", |text| {
+    ///     text.trim()
+    ///         .parse::<u32>()
+    ///         .map(|level| Volume { level })
+    ///         .map_err(|error| error.to_string())
+    /// });
+    /// ```
+    fn watch_config_with<T, F>(&mut self, path: &str, parser: F) -> &mut Self
+    where
+        T: Resource + Default + Send + Sync + 'static,
+        F: Fn(&str) -> Result<T, String> + Send + Sync + 'static;
 }
 
-impl Default for ConfigHmrPlugin {
-    fn default() -> Self {
-        Self {
-            debounce_window: Duration::from_millis(DEFAULT_DEBOUNCE_MILLIS),
-        }
+impl ConfigWatchAppExt for App {
+    fn watch_config<T: Resource + DeserializeOwned + Default + Send + Sync + 'static>(
+        &mut self,
+        path: &str,
+    ) -> &mut Self {
+        let parse = watch::builtin_parser::<T>(path);
+        watch::install(
+            self,
+            watch::WatchRegistration {
+                path: path.to_string(),
+                parse,
+            },
+        );
+        self
     }
-}
 
-impl Plugin for ConfigHmrPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<ConfigPathRegistry>();
-        // Store the global debounce window so `App::register_config` can
-        // apply it to each per-type `RefreshDebouncer<T>`. This avoids the
-        // old "must use the same plugin instance" footgun.
-        app.insert_resource(HmrSettings {
-            debounce_window: self.debounce_window,
-        });
+    fn watch_config_with<T, F>(&mut self, path: &str, parser: F) -> &mut Self
+    where
+        T: Resource + Default + Send + Sync + 'static,
+        F: Fn(&str) -> Result<T, String> + Send + Sync + 'static,
+    {
+        watch::install(
+            self,
+            watch::WatchRegistration {
+                path: path.to_string(),
+                parse: Box::new(parser),
+            },
+        );
+        self
     }
-}
-
-/// Internal global settings, set by [`ConfigHmrPlugin::build`], read by
-/// [`App::register_config`](ConfigHmrAppExt::register_config).
-#[derive(Resource)]
-pub(crate) struct HmrSettings {
-    pub debounce_window: Duration,
 }
