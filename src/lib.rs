@@ -83,6 +83,38 @@
 //!   editing whitespace, comments, or fields `T` ignores does not fire
 //!   `Res<T>::is_changed`. This is whole-value precision, not per-field:
 //!   changing any field of `T` still fires it.
+//! - **Logging**: the first load and each successful hot reload are logged at
+//!   `info` (through `bevy::log`), the reload line including the changed field
+//!   paths for built-in formats; a content change that parses to an equal
+//!   value is logged at `debug`; parse/read failures are logged at
+//!   `error`/`warn` and keep the last value.
+//!
+//! # Changed fields
+//!
+//! For the built-in `.ron` / `.json` formats, each reload also reports *which*
+//! fields changed, both in the log line and through the [`ConfigChanges<T>`]
+//! resource:
+//!
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use bevy_assets_hmr::{ConfigChanges, ConfigWatchAppExt};
+//! # use serde::Deserialize;
+//! # #[derive(Resource, Deserialize, PartialEq, Default)]
+//! # struct Settings { title: String }
+//! fn on_settings(settings: Res<Settings>, changes: Res<ConfigChanges<Settings>>) {
+//!     if !settings.is_changed() {
+//!         return;
+//!     }
+//!     if changes.contains("title") {
+//!         println!("title 变了: {}", settings.title);
+//!     }
+//! }
+//! ```
+//!
+//! Paths are dotted for nesting (`graphics.resolution`) and use the field's own
+//! name for an array (`npcs`). Custom parsers
+//! ([`watch_config_with`](ConfigWatchAppExt::watch_config_with)) have no generic
+//! structural diff, so [`ConfigChanges`] stays empty there.
 //!
 //! # Requirements on `T`
 //!
@@ -110,7 +142,7 @@
 
 mod watch;
 
-pub use watch::{ConfigWatchPlugin, DEFAULT_POLL_INTERVAL, DEFAULT_ROOT};
+pub use watch::{ConfigChanges, ConfigWatchPlugin, DEFAULT_POLL_INTERVAL, DEFAULT_ROOT};
 
 use bevy::prelude::*;
 use serde::de::DeserializeOwned;
@@ -174,12 +206,13 @@ impl ConfigWatchAppExt for App {
         &mut self,
         path: &str,
     ) -> &mut Self {
-        let parse = watch::builtin_parser::<T>(path);
+        let (parse, format) = watch::builtin_parser::<T>(path);
         watch::install(
             self,
             watch::WatchRegistration {
                 path: path.to_string(),
                 parse,
+                format: Some(format),
             },
         );
         self
@@ -195,6 +228,7 @@ impl ConfigWatchAppExt for App {
             watch::WatchRegistration {
                 path: path.to_string(),
                 parse: Box::new(parser),
+                format: None,
             },
         );
         self

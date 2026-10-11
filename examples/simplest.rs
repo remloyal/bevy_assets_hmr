@@ -6,7 +6,7 @@
 //! 没有 diff、没有钩子。`NpcDatabase` 就是普通 Resource。
 
 use bevy::prelude::*;
-use bevy_assets_hmr::ConfigWatchAppExt;
+use bevy_assets_hmr::{ConfigChanges, ConfigWatchAppExt};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -39,12 +39,15 @@ const V2: &str = r#"(
 
 const BROKEN: &str = r#"(npcs: [(id: "x", name: "y", hp: oops)])"#;
 
-/// 消费侧：读自己的类型，`is_changed()` 是 Bevy 自带的变更检测。
-fn report(db: Res<NpcDatabase>) {
+/// 消费侧：读自己的类型；`ConfigChanges` 告诉你哪些字段变了。
+fn report(db: Res<NpcDatabase>, changes: Res<ConfigChanges<NpcDatabase>>) {
     if !db.is_changed() {
         return;
     }
-    println!("[HMR] 当前 {} 个 NPC:", db.npcs.len());
+    if !changes.is_empty() {
+        println!("[业务] 变更字段: {}", changes.changed.join(", "));
+    }
+    println!("[业务] 当前 {} 个 NPC:", db.npcs.len());
     for npc in &db.npcs {
         println!("      {} ({}) hp={}", npc.id, npc.name, npc.hp);
     }

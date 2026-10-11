@@ -61,6 +61,29 @@ app.watch_config::<Settings>("data/settings.ron")   // ron::de::from_bytes
 | `.json` | `serde_json::from_slice` |
 | 其它 | 必须用 `watch_config_with` 提供解析函数（收到原始字节）；直接 `watch_config` 会 panic 并提示 |
 
+## 变更字段（内置格式）
+
+对 `.ron` / `.json`，每次热更新还会判断**哪些字段变了**，既写进日志，也放进 `ConfigChanges<T>` 资源：
+
+```rust
+use bevy_assets_hmr::ConfigChanges;
+
+fn on_settings(settings: Res<Settings>, changes: Res<ConfigChanges<Settings>>) {
+    if !settings.is_changed() {
+        return;
+    }
+    if changes.contains("title") {
+        println!("title 变了: {}", settings.title);
+    }
+    println!("本次变更字段: {:?}", changes.changed); // 例如 ["graphics.resolution"]
+}
+```
+
+- 路径用点号表示嵌套（`graphics.resolution`）；数组/`Vec` 报其字段名本身（`npcs`），不做逐元素 diff。
+- `ConfigChanges<T>.revision` 每次真正重载 +1；首次加载不算变更，`changed` 为空。
+- 原理是对新旧文件各解析成通用结构值再递归对比，**不需要**给你的类型额外加 `Reflect` 之类派生。
+- 自定义格式（`watch_config_with`）没有通用结构 diff，`ConfigChanges` 始终为空。
+
 ## 对配置类型的要求
 
 `T` 需要 `Resource + Deserialize + PartialEq + Default`：
@@ -78,6 +101,7 @@ app.watch_config::<Settings>("data/settings.ron")   // ron::de::from_bytes
 
 - **自动加载**：注册的类型在 app 第一次 update 时即加载文件，无需单独的 Startup 步骤。
 - **精准变更**：文件每次轮询都会重新读取并与上一版字节比较（不依赖文件系统 mtime 精度），解析后的值再与世界里当前的值比较，**只有真的不同才重新插入资源**。因此改空格/注释、或改 `T` 里没有（被 serde 忽略）的字段，都不会触发 `Res::is_changed()`。
+- **日志**：首次加载与每次成功热更新打 `info`（`[HMR] <路径> 首次加载` / `已热更新，变更字段: ...`）；内容变了但解析值没变打 `debug`；解析/读取失败打 `error`/`warn` 并保留上一份值。都走 `bevy::log`，所以在装了 `LogPlugin`（`DefaultPlugins` 自带）的应用里默认可见。
 - **防抖**：默认每 150ms 轮询一次，天然合并编辑器的原子写入（删除 + 重命名）。
 - **出错不丢数据**：解析失败或文件暂时缺失时，上一份合法值仍保留在世界里，错误写入日志（`bevy::log`）；文件修好后自动恢复。
 - **一个类型一个文件**：同一个 `T` 重复注册会打 warning 并忽略第二个路径。
@@ -88,6 +112,7 @@ app.watch_config::<Settings>("data/settings.ron")   // ron::de::from_bytes
 |---|---|
 | `App::watch_config::<T>(path)` | 按扩展名（`.ron`/`.json`）注册要监听的文件。`T` 需实现 `Resource + Deserialize + PartialEq + Default`。 |
 | `App::watch_config_with::<T, F>(path, parser)` | 自定义格式，`parser: Fn(&[u8]) -> Result<T, String>`（原始字节，文本/二进制均可）。`T` 无需 `Deserialize`，但仍需 `Resource + PartialEq + Default`。 |
+| `ConfigChanges<T>` | Resource。`changed: Vec<String>`（上次重载变更的字段路径，点号分层）、`revision: u64`、`contains(path)`、`is_empty()`。仅内置 `.ron`/`.json` 有值。 |
 | `ConfigWatchPlugin` | 可选插件，用于自定义 `root`（默认 `assets`）与 `poll_interval`（默认 150ms）。须在注册之前添加。 |
 | `DEFAULT_ROOT` / `DEFAULT_POLL_INTERVAL` | 上述默认值常量。 |
 

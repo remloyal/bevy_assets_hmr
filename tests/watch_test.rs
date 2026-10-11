@@ -1,7 +1,7 @@
 //! End-to-end tests for the minimal config watcher.
 
 use bevy::prelude::*;
-use bevy_assets_hmr::{ConfigWatchAppExt, ConfigWatchPlugin};
+use bevy_assets_hmr::{ConfigChanges, ConfigWatchAppExt, ConfigWatchPlugin};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -355,6 +355,89 @@ fn custom_parser_loads_and_reloads() {
     std::fs::write(dir.join("settings.ini"), "title = Game\nvolume = 9\n").unwrap();
     app.update();
     assert_eq!(app.world().resource::<KeyValues>().volume, 9);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Changed-field reporting (built-in formats)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reports_changed_field_ron() {
+    let dir = make_dir("changed_field_ron");
+    std::fs::write(dir.join("settings.ron"), V1).unwrap();
+
+    let mut app = app_for(&dir);
+    app.watch_config::<Settings>("settings.ron");
+    app.update();
+    // The first load has no prior version to diff against.
+    assert!(app.world().resource::<ConfigChanges<Settings>>().is_empty());
+
+    std::fs::write(dir.join("settings.ron"), r#"(title: "Hello", max_players: 8)"#).unwrap();
+    app.update();
+
+    let changes = app.world().resource::<ConfigChanges<Settings>>();
+    assert_eq!(changes.changed, vec!["max_players".to_string()]);
+    assert_eq!(changes.revision, 1);
+    assert!(changes.contains("max_players"));
+    assert!(!changes.contains("title"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reports_changed_field_json() {
+    let dir = make_dir("changed_field_json");
+    std::fs::write(dir.join("settings.json"), r#"{"title":"A","max_players":1}"#).unwrap();
+
+    let mut app = app_for(&dir);
+    app.watch_config::<Settings>("settings.json");
+    app.update();
+
+    std::fs::write(dir.join("settings.json"), r#"{"title":"B","max_players":1}"#).unwrap();
+    app.update();
+
+    let changes = app.world().resource::<ConfigChanges<Settings>>();
+    assert_eq!(changes.changed, vec!["title".to_string()]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[derive(Resource, Deserialize, Debug, PartialEq, Default)]
+struct Nested {
+    title: String,
+    graphics: Graphics,
+}
+
+#[derive(Deserialize, Debug, PartialEq, Default)]
+struct Graphics {
+    resolution: u32,
+    vsync: bool,
+}
+
+#[test]
+fn reports_nested_changed_field_path() {
+    let dir = make_dir("changed_nested");
+    std::fs::write(
+        dir.join("nested.ron"),
+        r#"(title: "x", graphics: (resolution: 1080, vsync: true))"#,
+    )
+    .unwrap();
+
+    let mut app = app_for(&dir);
+    app.watch_config::<Nested>("nested.ron");
+    app.update();
+
+    std::fs::write(
+        dir.join("nested.ron"),
+        r#"(title: "x", graphics: (resolution: 720, vsync: true))"#,
+    )
+    .unwrap();
+    app.update();
+
+    let changes = app.world().resource::<ConfigChanges<Nested>>();
+    assert_eq!(changes.changed, vec!["graphics.resolution".to_string()]);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

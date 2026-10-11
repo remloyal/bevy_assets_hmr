@@ -28,7 +28,7 @@ fn report(db: Res<NpcDatabase>) {
     if !db.is_changed() {
         return;
     }
-    println!("[HMR] npc.ron 已热更新，当前 {} 个 NPC:", db.npcs.len());
+    println!("[业务] 当前 {} 个 NPC:", db.npcs.len());
     for npc in &db.npcs {
         println!("      {} ({}) hp={}", npc.id, npc.name, npc.hp);
     }
