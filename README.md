@@ -12,7 +12,7 @@
 
 ```toml
 [dependencies]
-bevy_assets_hmr = { git = "https://github.com/remloyal/bevy_assets_hmr" }
+bevy_assets_hmr = "0.1"
 ```
 
 ```rust

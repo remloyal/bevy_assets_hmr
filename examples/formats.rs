@@ -73,7 +73,11 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
 
     std::fs::write(dir.join("gameplay.ron"), r#"(difficulty: "easy")"#).unwrap();
-    std::fs::write(dir.join("server.json"), r#"{"host": "127.0.0.1", "port": 8080}"#).unwrap();
+    std::fs::write(
+        dir.join("server.json"),
+        r#"{"host": "127.0.0.1", "port": 8080}"#,
+    )
+    .unwrap();
     std::fs::write(dir.join("settings.ini"), "title = 我的游戏\nvolume = 5\n").unwrap();
 
     let mut app = App::new();
@@ -93,7 +97,11 @@ fn main() {
 
     println!("\n=== 同时修改三个文件 ===");
     std::fs::write(dir.join("gameplay.ron"), r#"(difficulty: "nightmare")"#).unwrap();
-    std::fs::write(dir.join("server.json"), r#"{"host": "10.0.0.2", "port": 9000}"#).unwrap();
+    std::fs::write(
+        dir.join("server.json"),
+        r#"{"host": "10.0.0.2", "port": 9000}"#,
+    )
+    .unwrap();
     std::fs::write(dir.join("settings.ini"), "title = 我的游戏\nvolume = 11\n").unwrap();
     app.update();
 

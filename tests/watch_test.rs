@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy_assets_hmr::{ConfigChanges, ConfigWatchAppExt, ConfigWatchPlugin};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Resource, Deserialize, Debug, PartialEq, Default)]
@@ -27,11 +27,11 @@ fn make_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn app_for(dir: &PathBuf) -> App {
+fn app_for(dir: &Path) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(ConfigWatchPlugin {
-            root: dir.clone(),
+            root: dir.to_path_buf(),
             poll_interval: Duration::ZERO,
         });
     app
@@ -374,7 +374,11 @@ fn reports_changed_field_ron() {
     // The first load has no prior version to diff against.
     assert!(app.world().resource::<ConfigChanges<Settings>>().is_empty());
 
-    std::fs::write(dir.join("settings.ron"), r#"(title: "Hello", max_players: 8)"#).unwrap();
+    std::fs::write(
+        dir.join("settings.ron"),
+        r#"(title: "Hello", max_players: 8)"#,
+    )
+    .unwrap();
     app.update();
 
     let changes = app.world().resource::<ConfigChanges<Settings>>();
@@ -389,13 +393,21 @@ fn reports_changed_field_ron() {
 #[test]
 fn reports_changed_field_json() {
     let dir = make_dir("changed_field_json");
-    std::fs::write(dir.join("settings.json"), r#"{"title":"A","max_players":1}"#).unwrap();
+    std::fs::write(
+        dir.join("settings.json"),
+        r#"{"title":"A","max_players":1}"#,
+    )
+    .unwrap();
 
     let mut app = app_for(&dir);
     app.watch_config::<Settings>("settings.json");
     app.update();
 
-    std::fs::write(dir.join("settings.json"), r#"{"title":"B","max_players":1}"#).unwrap();
+    std::fs::write(
+        dir.join("settings.json"),
+        r#"{"title":"B","max_players":1}"#,
+    )
+    .unwrap();
     app.update();
 
     let changes = app.world().resource::<ConfigChanges<Settings>>();

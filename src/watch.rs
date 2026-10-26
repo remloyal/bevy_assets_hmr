@@ -93,12 +93,15 @@ impl Default for WatchSettings {
     }
 }
 
+/// Parser over a config file's raw bytes.
+pub(crate) type ConfigParser<T> = Box<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync>;
+
 /// Per-type registration: which file `T` is loaded from, how to parse it, and
 /// (for built-in formats) whether it can be structurally diffed.
 #[derive(Resource)]
 pub(crate) struct WatchRegistration<T> {
     pub(crate) path: String,
-    pub(crate) parse: Box<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync>,
+    pub(crate) parse: ConfigParser<T>,
     pub(crate) format: Option<BuiltinFormat>,
 }
 
@@ -168,7 +171,7 @@ impl Plugin for ConfigWatchPlugin {
 /// `watch_config_with`.
 pub(crate) fn builtin_parser<T: DeserializeOwned + 'static>(
     path: &str,
-) -> (Box<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync>, BuiltinFormat) {
+) -> (ConfigParser<T>, BuiltinFormat) {
     match Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -251,7 +254,7 @@ pub(crate) fn poll_config<T: Resource + PartialEq + Default + Send + Sync + 'sta
                     // Only re-insert when the parsed value actually changed:
                     // whitespace/comment edits, or edits to fields `T` ignores,
                     // parse to an equal value and must not fire `is_changed`.
-                    let changed = &*current != &value;
+                    let changed = *current != value;
                     let was_loaded = state.loaded_once;
                     // Diff old vs new structure for built-in formats, before
                     // `state.last_bytes` is overwritten. Only real reloads

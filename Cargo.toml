@@ -1,6 +1,6 @@
 [package]
 name = "bevy_assets_hmr"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Minimal config-file hot-reload for Bevy 0.20: watch a RON/JSON (or custom-format) file and read it from a Resource anywhere."

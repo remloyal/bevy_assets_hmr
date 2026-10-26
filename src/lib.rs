@@ -202,7 +202,9 @@ pub trait ConfigWatchAppExt {
 }
 
 impl ConfigWatchAppExt for App {
-    fn watch_config<T: Resource + DeserializeOwned + PartialEq + Default + Send + Sync + 'static>(
+    fn watch_config<
+        T: Resource + DeserializeOwned + PartialEq + Default + Send + Sync + 'static,
+    >(
         &mut self,
         path: &str,
     ) -> &mut Self {
